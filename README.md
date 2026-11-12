@@ -48,6 +48,62 @@ Huge thanks to [loud-at-heart](https://github.com/loud-at-heart) for the [AMS](h
   Playing card should show up with working controls. Text yourself to test
   notifications.
 
+### Windows / VS Code development
+
+Android Studio is optional for building and installing from VS Code. Install a
+full **JDK 21** (not a JRE), Android SDK command-line tools, `platform-tools`,
+the **Android API 36.1** platform, and the build-tools version requested by
+Gradle. The current command-line tools include Android CLI:
+
+```powershell
+android --no-metrics sdk install "platform-tools" "platforms;android-36.1" "build-tools;36.0.0"
+```
+
+Review and accept Google's SDK terms when installing. With older command-line
+tools, use `sdkmanager` and `sdkmanager --licenses` instead. Set user environment
+variables `JAVA_HOME` to the JDK directory and `ANDROID_HOME` to the SDK directory;
+add their `bin` / `platform-tools` directories to your user `Path`. Restart
+VS Code after changing environment variables.
+
+Install the workspace's recommended extensions: **Kotlin by JetBrains**,
+**Gradle for Java**, and **PowerShell**. Kotlin's Android support is experimental;
+use Android Studio for integrated Compose previews and Android debugger tooling.
+The tasks below use Gradle and ADB directly, independent of extensions.
+
+1. Put the PC and watch on the same Wi-Fi network.
+2. On the watch, open **Settings > System > About > Versions** and tap
+   **Build number** seven times to enable developer options.
+3. Under **Settings > Developer options**, enable **ADB debugging** and
+   **Wireless debugging**, and allow your Wi-Fi network.
+4. Select **Wireless debugging > Pair new device**. In VS Code, run
+   **Terminal > Run Task > Watch: Pair (enter code in terminal)**, enter the
+   displayed `IP:pairing-port`, then enter the pairing code in the task terminal.
+   Do not save the pairing code in workspace files.
+5. Return to the main **Wireless debugging** screen. Run **Watch: Connect**
+   using that screen's `IP:connection-port`. This is usually a **different port**
+   from the pairing port and can change when wireless debugging restarts.
+6. Run **Watch: List devices** and check the watch is listed as `device`.
+7. Run **Watch: Build, install and launch** using the connection address.
+   It installs the debug APK on that specific device without removing app data
+   and opens the app. Updating an APK signed by a different key will fail;
+   uninstalling the existing app first deletes its data.
+
+**Ctrl+Shift+B** builds the debug APK without installing it.
+**Watch: Logcat** streams device logs; stop it with **Ctrl+C**.
+The same workflow is available from PowerShell:
+
+```powershell
+.\scripts\Watch.ps1 -Action Build
+.\scripts\Watch.ps1 -Action Pair -Target "192.168.1.50:PAIRING_PORT"
+.\scripts\Watch.ps1 -Action Connect -Target "192.168.1.50:CONNECTION_PORT"
+.\scripts\Watch.ps1 -Action Install -Target "192.168.1.50:CONNECTION_PORT"
+```
+
+Use the ports shown on your watch, not the placeholders above. If connections
+fail, check for Wi-Fi client isolation or try a shared hotspot. Disable wireless
+debugging when finished. Bluetooth debugging is not supported on Wear OS 3+.
+See Google's [Wear OS wireless debugging guide](https://developer.android.com/training/wearables/get-started/debug-wifi).
+
 ## References
 
 - [Apple Notification Center Service (ANCS) specification](https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleNotificationCenterServiceSpecification/Specification/Specification.html)

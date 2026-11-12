@@ -1,0 +1,86 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Watch: Build debug APK",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\scripts\\Watch.ps1",
+                "-Action", "Build"
+            ],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "Watch: Pair (enter code in terminal)",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\scripts\\Watch.ps1",
+                "-Action", "Pair", "-Target", "${input:pairingAddress}"
+            ],
+            "presentation": { "reveal": "always", "focus": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "Watch: Connect",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\scripts\\Watch.ps1",
+                "-Action", "Connect", "-Target", "${input:watchAddress}"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Watch: List devices",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\scripts\\Watch.ps1",
+                "-Action", "Devices"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Watch: Build, install and launch",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\scripts\\Watch.ps1",
+                "-Action", "Install", "-Target", "${input:watchAddress}"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Watch: Logcat",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\scripts\\Watch.ps1",
+                "-Action", "Logcat", "-Target", "${input:watchAddress}"
+            ],
+            "presentation": { "reveal": "always" },
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "pairingAddress",
+            "type": "promptString",
+            "description": "Watch IP:pairing-port from Wireless debugging > Pair new device"
+        },
+        {
+            "id": "watchAddress",
+            "type": "promptString",
+            "description": "Watch IP:connection-port from the main Wireless debugging screen"
+        }
+    ]
+}

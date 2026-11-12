@@ -1,0 +1,7 @@
+{
+    "recommendations": [
+        "jetbrains.kotlin-server",
+        "vscjava.vscode-gradle",
+        "ms-vscode.powershell"
+    ]
+}
