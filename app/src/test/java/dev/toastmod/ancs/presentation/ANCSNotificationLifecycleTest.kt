@@ -3,6 +3,7 @@ package dev.toastmod.ancs.presentation
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import androidx.core.app.NotificationCompat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -56,6 +57,92 @@ class ANCSNotificationLifecycleTest {
         val notification = manager.activeNotifications.single()
         assertEquals(1, notification.id)
         assertEquals("Updated", notification.notification.extras.getString(Notification.EXTRA_TITLE))
+    }
+
+    @Test
+    fun removalBeforeAttributesArriveDoesNotRecreateTheNotification() {
+        val client = client()
+        client.onNotificationSource(EventID.NotificationAdded.b, 0, 0, uid(1))
+        client.onAttributes(uid(1), attributes("Original"))
+        client.onNotificationSource(EventID.NotificationModified.b, 0, 0, uid(1))
+        client.onNotificationSource(EventID.NotificationRemoved.b, 0, 0, uid(1))
+        client.onAttributes(uid(1), attributes("Late update"))
+        assertFalse(client.contains(uid(1)))
+        assertTrue(manager.activeNotifications.isEmpty())
+
+        client.onNotificationSource(EventID.NotificationAdded.b, 0, 0, uid(2))
+        client.onNotificationSource(EventID.NotificationRemoved.b, 0, 0, uid(2))
+        client.onAttributes(uid(2), attributes("Late first response"))
+        assertTrue(manager.activeNotifications.isEmpty())
+    }
+
+    @Test
+    fun silentAndPreExistingFlagsSuppressTheFirstAlert() {
+        val client = client()
+        for ((id, flags) in listOf(1 to 1, 2 to 4, 3 to 5, 4 to 0)) {
+            client.onNotificationSource(EventID.NotificationAdded.b, flags.toByte(), 0, uid(id))
+            client.onAttributes(uid(id), attributes("Notification $id"))
+            val notification = manager.activeNotifications.single { it.id == id }.notification
+            assertEquals("Flags $flags",
+                if (flags == 0) NotificationCompat.GROUP_ALERT_ALL else NotificationCompat.GROUP_ALERT_SUMMARY,
+                notification.groupAlertBehavior)
+            assertTrue(notification.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
+        }
+    }
+
+    @Test
+    fun updatesRemainSilentEvenWhenTheSilentFlagIsCleared() {
+        val client = client()
+        for ((id, flags) in listOf(1 to 0, 2 to 1, 3 to 4)) {
+            client.onNotificationSource(EventID.NotificationAdded.b, flags.toByte(), 0, uid(id))
+            client.onAttributes(uid(id), attributes("Original"))
+            client.onNotificationSource(EventID.NotificationModified.b, 0, 0, uid(id))
+            client.onAttributes(uid(id), attributes("Updated"))
+            val notification = manager.activeNotifications.single { it.id == id }.notification
+            assertEquals(NotificationCompat.GROUP_ALERT_SUMMARY, notification.groupAlertBehavior)
+            assertTrue(notification.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
+        }
+    }
+
+    @Test
+    fun clearingNotificationsPreservesUnrelatedNotificationsAndAllowsUidReuse() {
+        val client = client()
+        client.onNotificationSource(EventID.NotificationAdded.b, 0, 0, uid(1))
+        client.onAttributes(uid(1), attributes("Old session"))
+        val unrelated = Notification.Builder(context, channel.id)
+            .setSmallIcon(android.R.drawable.ic_dialog_info).build()
+        manager.notify(9002, unrelated)
+        manager.notify("Other", 1, unrelated)
+
+        client.clear()
+        assertFalse(client.contains(uid(1)))
+        assertEquals(setOf(null to 9002, "Other" to 1),
+            manager.activeNotifications.map { it.tag to it.id }.toSet())
+        client.onAttributes(uid(1), attributes("Late old session"))
+        assertEquals(2, manager.activeNotifications.size)
+
+        assertTrue(client.onNotificationSource(EventID.NotificationAdded.b, 0, 0, uid(1)))
+        client.onAttributes(uid(1), attributes("New session"))
+        val notification = manager.activeNotifications.single { it.tag == ANCSNotification.TAG }.notification
+        assertEquals("New session", notification.extras.getString(Notification.EXTRA_TITLE))
+        assertEquals(NotificationCompat.GROUP_ALERT_ALL, notification.groupAlertBehavior)
+    }
+
+    @Test
+    fun updatingTheOldestNotificationDoesNotChangeEvictionOrder() {
+        val client = client()
+        for (id in 0 until 20) {
+            client.onNotificationSource(EventID.NotificationAdded.b, 0, 0, uid(id))
+            client.onAttributes(uid(id), attributes("Notification $id"))
+        }
+        client.onNotificationSource(EventID.NotificationModified.b, 0, 0, uid(0))
+        client.onAttributes(uid(0), attributes("Updated oldest"))
+        client.onNotificationSource(EventID.NotificationAdded.b, 0, 0, uid(20))
+        client.onAttributes(uid(20), attributes("Newest"))
+
+        assertFalse(client.contains(uid(0)))
+        for (id in 1..20) assertTrue(client.contains(uid(id)))
+        assertEquals((1..20).toSet(), manager.activeNotifications.map { it.id }.toSet())
     }
 
     @Test

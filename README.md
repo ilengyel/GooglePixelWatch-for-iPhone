@@ -15,6 +15,8 @@ Huge thanks to [loud-at-heart](https://github.com/loud-at-heart) for the [AMS](h
 > real iPhone BLE connection or validate battery consumption. Other Pixel
 > Watch generations may behave differently.
 
+> **This fork is tested against: Google Pixel Watch 4.**
+
 ## What it does
 
 - **Notifications (ANCS):** subscribes to the iPhone's Notification Center
@@ -74,13 +76,6 @@ or media services are unavailable, check the iPhone's Bluetooth sharing settings
 ```powershell
 .\gradlew.bat :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```
-
-Unit tests cover fragmented notification responses, media state handling,
-notification eviction/updates, and stale-notification cleanup on service creation.
-Before relying on the bridge, test on a real watch: first-run permissions,
-device selection, repeated app opening, long notifications, updates/removals,
-silent notifications, media controls, and disconnect/reconnect while playing.
-Battery efficiency requires real-device measurement.
 
 ### Windows / VS Code development
 
