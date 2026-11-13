@@ -41,6 +41,8 @@ android {
 }
 
 dependencies {
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
     implementation(libs.guava)
     implementation(libs.play.services.wearable)
     implementation(platform(libs.compose.bom))

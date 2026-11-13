@@ -1,530 +1,494 @@
 package dev.toastmod.ancs.presentation
 
-import android.Manifest
-import android.app.NotificationChannel
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
-import android.os.Build
-import android.os.Vibrator
 import android.util.Log
-import androidx.annotation.RequiresApi
-import androidx.annotation.RequiresPermission
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicBoolean
 
+@SuppressLint("MissingPermission")
 class ANCSGattServiceClient(
-    context: Context,
-    channel: NotificationChannel,
-    vibrator: Vibrator,
-    private val amsClient: AMSClient
+    private val context: Context,
+    private val device: BluetoothDevice,
+    private val client: ANCSClient,
+    private val amsClient: AMSClient,
+    private val onStatus: (String) -> Unit
 ) : BluetoothGattCallback() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var gatt: BluetoothGatt? = null
+    private var sessionJob: Job? = null
+    private var connectionJob: Job? = null
+    private var retryDelay = 1_000L
+    private var queue: Channel<Operation>? = null
+    private val requestedNotifications = linkedMapOf<Int, ByteArray>()
+    private var notificationQueued = false
+    private val attributeVersions = mutableMapOf<Pair<Byte, Byte>, Int>()
+    private var pendingCallback: PendingCallback? = null
+    private var pendingNotification: PendingNotification? = null
+    private var refreshQueued = false
+    private var connectedStatus = "Connected"
 
-    private val client = ANCSClient(context, channel, vibrator)
-
-    private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-    private val CCCD_SUB_NOTIFICATIONS: ByteArray = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-
-    class WriteQueueItem(
-        val char: BluetoothGattCharacteristic?,
-        val data: ByteArray,
-        val writeType: Int = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
-        val expectsCallback: Boolean = true
-    )
-
-    sealed class QueueItem {
-        data class AncsCharWrite(val item: WriteQueueItem) : QueueItem()
-        data class AmsCharWrite(val item: WriteQueueItem) : QueueItem()
-        data class DescWrite(val cccd: BluetoothGattDescriptor) : QueueItem()
+    private sealed interface Operation {
+        data object Notification : Operation
+        data class Command(val command: Byte) : Operation
+        data class Attribute(val entity: Byte, val attribute: Byte, val version: Int) : Operation
+        data object RefreshTrack : Operation
     }
 
-    private enum class AMSSetupPhase {
-        NONE,
-        TRACK_PENDING,
-        PLAYER_PENDING
-    }
+    private enum class CallbackKind { SERVICES, WRITE, READ, DESCRIPTOR }
 
-    private var targetANCSServers = mutableListOf<String>()
-
-    private var subscribedDataSource = false
-    private var subscribedNotifSource = false
-    private var fullySubscribed = AtomicBoolean(false)
-    private var awaitingResubscribeEnable = false
-
-    private var dataSourceBuffer = ByteArray(0)
-
-    private var queue: Channel<QueueItem> = Channel(Channel.UNLIMITED)
-    private var lockCh: Channel<Int> = Channel()
-    private val scope = CoroutineScope(Dispatchers.Default)
-
-    private var connectedGatt: BluetoothGatt? = null
-    private var amsSetupPhase = AMSSetupPhase.NONE
-
-    private val trackSubscriptionPayload = byteArrayOf(
-        AMSEntityID.Track.b,
-        AMSTrackAttributeID.Artist.b,
-        AMSTrackAttributeID.Album.b,
-        AMSTrackAttributeID.Title.b,
-        AMSTrackAttributeID.Duration.b
+    private data class PendingCallback(
+        val kind: CallbackKind,
+        val uuid: UUID?,
+        val result: CompletableDeferred<ByteArray>
     )
-    private val playerSubscriptionPayload = byteArrayOf(
-        AMSEntityID.Player.b,
-        AMSPlayerAttributeID.PlaybackInfo.b
+
+    private data class PendingNotification(
+        val response: ANCSResponse,
+        val result: CompletableDeferred<ANCSAttributes>
     )
+
+    private class GattFailure(message: String) : Exception(message)
+    private class GattStatusFailure(val status: Int) : Exception("GATT status $status")
 
     init {
-        watchForStaleTrackInfo()
-    }
-
-    /**
-     * iOS doesn't always resend the current Track entity values on a fresh AMS subscription when
-     * a song was already playing before the watch connected/reconnected (a known AMS quirk) - the
-     * one-time registration in [onDescriptorWrite] can go unanswered, leaving [AMSClient] stuck
-     * reporting a playing state with no title/artist forever. This periodically checks for exactly
-     * that stuck combination (playing, no track data) and re-writes the Track subscription to
-     * nudge iOS into resending it, so the UI's "Loading track info…" state actually resolves
-     * instead of waiting on a push that may never come. No-ops harmlessly whenever track data is
-     * already present, playback is paused, or there's no active connection.
-     */
-    private fun watchForStaleTrackInfo() {
         scope.launch {
-            while (true) {
-                delay(3_000)
-                val state = amsClient.state.value
-                if (state.player.isPlaying && !state.track.hasData && !awaitingResubscribeEnable) {
-                    val gatt = connectedGatt ?: continue
-                    Log.i("AMS", "Player is playing but no track metadata yet - cycling Track subscription")
-                    requestTrackRefresh(gatt)
+            amsClient.state.map { it.available && it.player.isPlaying && !it.track.hasData }
+                .distinctUntilChanged()
+                .collectLatest { missing ->
+                    if (missing) {
+                        repeat(2) { attempt ->
+                            delay(3_000L * (attempt + 1))
+                            if (!refreshQueued) {
+                                refreshQueued = true
+                                enqueue(Operation.RefreshTrack)
+                            }
+                        }
+                        delay(3_000)
+                        Log.w("AMS", "Track metadata still absent after bounded recovery")
+                        onStatus("Connected; iPhone has not supplied track information")
+                    } else if (amsClient.state.value.available) {
+                        onStatus(connectedStatus)
+                    }
                 }
-            }
         }
     }
 
-    /**
-     * Simply re-writing the same Entity Update registration (same EntityID+AttributeIDs) gets
-     * silently ignored by iOS - from its point of view nothing changed, so there's nothing to
-     * resend. What actually forces a resend of the current Track values is disabling the AMS
-     * Entity Update characteristic's notifications and re-enabling them, which iOS treats as a
-     * brand new companion registration. [onDescriptorWrite] completes the other half of this once
-     * the disable write lands.
-     */
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    private fun requestTrackRefresh(gatt: BluetoothGatt) {
-        val entityUpdate = gatt.getService(AMS_SERVICE)?.getCharacteristic(AMS_ENTITY_UPDATE)
-        val cccd = entityUpdate?.getDescriptor(CCCD_UUID)
-        if (cccd == null) {
-            Log.e("AMS", "Cannot refresh Track subscription: Entity Update CCCD missing")
-            return
-        }
-        awaitingResubscribeEnable = true
-        val result = gatt.writeDescriptor(cccd, BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)
-        if (result != BluetoothGatt.GATT_SUCCESS) {
-            Log.e("AMS", "Failed to start disabling AMS Entity Update subscription: code=$result")
-            awaitingResubscribeEnable = false
+    fun connect() {
+        if (gatt != null) return
+        connectionJob?.cancel()
+        onStatus("Connecting to iPhone")
+        try {
+            gatt = device.connectGatt(context, false, this, BluetoothDevice.TRANSPORT_LE)
+            if (gatt == null) {
+                reconnect("Could not create Bluetooth connection")
+                return
+            }
+            connectionJob = scope.launch {
+                delay(20_000)
+                reconnect("Bluetooth connection timed out")
+            }
+        } catch (error: SecurityException) {
+            Log.e("ANCS", "Bluetooth permission unavailable", error)
+            onStatus("Bluetooth permission required; reopen the app")
         }
     }
 
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
-        if (newState == BluetoothProfile.STATE_CONNECTED) {
-            if (gatt != null) {
-                connectedGatt = gatt
-                Log.i("ANCSDiscover", "Connected to ${gatt.device.alias} | bondstate: ${gatt.device.bondState}")
-                gatt.discoverServices()
-            }
-        } else {
-            amsSetupPhase = AMSSetupPhase.NONE
-            amsClient.reset()
-            connectedGatt = null
-            if (gatt != null) {
-                Log.i("ANCSDiscover", "Disconnected from ${gatt.device.alias}")
-                if (targetANCSServers.contains(gatt.device.address)) {
-                    Log.i("ANCSDiscover", "Attempting to recconect to ${gatt.device.alias}")
-                    gatt.connect()
+    fun close() {
+        scope.cancel()
+        disposeConnection()
+    }
+
+    private fun disposeConnection() {
+        connectionJob?.cancel()
+        sessionJob?.cancel()
+        sessionJob = null
+        queue?.close()
+        queue = null
+        pendingCallback?.result?.cancel()
+        pendingCallback = null
+        pendingNotification?.result?.cancel()
+        pendingNotification = null
+        requestedNotifications.clear()
+        notificationQueued = false
+        attributeVersions.clear()
+        refreshQueued = false
+        val previous = gatt
+        gatt = null
+        try {
+            previous?.close()
+        } catch (error: SecurityException) {
+            Log.e("ANCS", "Permission revoked while closing Bluetooth", error)
+        }
+        amsClient.reset()
+        client.clear()
+    }
+
+    private fun reconnect(reason: String) {
+        Log.w("ANCS", reason)
+        disposeConnection()
+        onStatus("$reason; retrying in ${retryDelay / 1000}s")
+        val wait = retryDelay
+        retryDelay = (retryDelay * 2).coerceAtMost(60_000)
+        connectionJob = scope.launch {
+            delay(wait)
+            connect()
+        }
+    }
+
+    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+        scope.launch {
+            if (gatt !== this@ANCSGattServiceClient.gatt) return@launch
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        reconnect("Bluetooth connection failed: $status")
+                        return@launch
+                    }
+                    connectionJob?.cancel()
+                    startSession(gatt)
                 }
+                BluetoothProfile.STATE_DISCONNECTED -> reconnect("Bluetooth disconnected: $status")
             }
         }
     }
 
     override fun onServiceChanged(gatt: BluetoothGatt) {
-        Log.i("ANCSDiscover", "Service Changed!")
-    }
-
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
-        scope.launch { lockCh.send(0) }
         scope.launch {
-            while (gatt != null) {
-                lockCh.receive()
-                when (val op = queue.receive()) {
-                    is QueueItem.AncsCharWrite -> {
-                        if (fullySubscribed.get()) {
-                            val charWrite = op.item
-                            val char = charWrite.char
-                            if (char == null) {
-                                Log.e("ANCSQueue", "Dropped CHAR_WRITE: characteristic was null")
-                                lockCh.send(0)
-                                continue
-                            }
-                            val result = gatt.writeCharacteristic(char, charWrite.data, charWrite.writeType)
-                            if (result != BluetoothGatt.GATT_SUCCESS) {
-                                Log.e("ANCSQueue", "Characteristic write failed to start: code=$result uuid=${char.uuid}")
-                                lockCh.send(0)
-                            } else if (!charWrite.expectsCallback) {
-                                lockCh.send(0)
-                            }
-                        } else {
-                            queue.send(op)
-                            lockCh.send(0)
-                        }
-                    }
-
-                    is QueueItem.AmsCharWrite -> {
-                        val charWrite = op.item
-                        val char = charWrite.char
-                        if (char == null) {
-                            Log.e("AMSQueue", "Dropped AMS_CHAR_WRITE: characteristic was null")
-                            lockCh.send(0)
-                            continue
-                        }
-                        val result = gatt.writeCharacteristic(char, charWrite.data, charWrite.writeType)
-                        if (result != BluetoothGatt.GATT_SUCCESS) {
-                            Log.e("AMSQueue", "Characteristic write failed to start: code=$result uuid=${char.uuid}")
-                            lockCh.send(0)
-                        } else if (!charWrite.expectsCallback) {
-                            lockCh.send(0)
-                        }
-                    }
-
-                    is QueueItem.DescWrite -> {
-                        val cccd = op.cccd
-                        val result = gatt.writeDescriptor(cccd, CCCD_SUB_NOTIFICATIONS)
-                        if (result != BluetoothGatt.GATT_SUCCESS) {
-                            Log.e("ANCSQueue", "Descriptor write failed to start: code=$result uuid=${cccd.characteristic.uuid}")
-                            lockCh.send(0)
-                        }
-                    }
-                }
+            if (gatt === this@ANCSGattServiceClient.gatt) {
+                // Recreate the connection so no operation can use an invalidated service handle.
+                reconnect("iPhone services changed; rediscovering")
             }
         }
+    }
 
-        if (gatt == null) return
-        connectedGatt = gatt
-
-        val ancsService = gatt.services.firstOrNull { it.uuid == ANCS_SERVICE }
-        if (ancsService != null) {
-            gatt.device.createBond()
-            targetANCSServers.add(gatt.device.address)
-            ancsService.characteristics.forEach {
-                if (arrayOf(ANCS_DATA_SOURCE, ANCS_NOTIFICAITON_SOURCE).contains(it.uuid)) {
-                    val cccd = it.getDescriptor(CCCD_UUID)
-                    if (cccd != null) {
-                        Log.i("ANCSDiscover", "Attempting subscription to ANCS characteristic ${it.uuid}.")
-                        if (!gatt.setCharacteristicNotification(it, true)) {
-                            Log.i("ANCSDiscover", "A subscription will not notify! :(")
+    private fun startSession(gatt: BluetoothGatt) {
+        if (sessionJob?.isActive == true) return
+        val operations = Channel<Operation>(64)
+        queue = operations
+        sessionJob = scope.launch {
+            try {
+                awaitCallback(CallbackKind.SERVICES) { gatt.discoverServices() }
+                connectedStatus = setup(gatt)
+                retryDelay = 1_000
+                onStatus(connectedStatus)
+                for (operation in operations) {
+                    when (operation) {
+                        Operation.Notification -> {
+                            notificationQueued = false
+                            val uid = requestedNotifications.values.firstOrNull()
+                            if (uid != null) receiveNotification(gatt, uid)
+                            scheduleNotification()
                         }
-                        enqueueDescWrite(cccd)
+                        is Operation.Command -> {
+                            if (operation.command in amsClient.state.value.supportedCommands) {
+                                write(gatt, characteristic(gatt, AMS_SERVICE, AMS_REMOTE_COMMAND),
+                                    byteArrayOf(operation.command))
+                            } else {
+                                Log.w("AMS", "Command is no longer supported: ${operation.command}")
+                                onStatus("This media command is not supported by the iPhone")
+                            }
+                        }
+                        is Operation.Attribute -> readAttribute(gatt, operation)
+                        Operation.RefreshTrack -> {
+                            try {
+                                val state = amsClient.state.value
+                                if (state.available && state.player.isPlaying && !state.track.hasData) {
+                                    val update = characteristic(gatt, AMS_SERVICE, AMS_ENTITY_UPDATE)
+                                    subscribe(gatt, update, false)
+                                    subscribe(gatt, update)
+                                    registerMedia(gatt, update)
+                                }
+                            } finally {
+                                refreshQueued = false
+                            }
+                        }
                     }
                 }
+            } catch (error: TimeoutCancellationException) {
+                reconnect("Bluetooth operation timed out")
+            } catch (error: GattFailure) {
+                reconnect(error.message ?: "Bluetooth operation failed")
+            } catch (error: GattStatusFailure) {
+                reconnect("Bluetooth operation failed: ${error.status}")
+            } catch (error: SecurityException) {
+                Log.e("ANCS", "Bluetooth or notification permission revoked", error)
+                disposeConnection()
+                onStatus("Permission revoked; reopen the app")
             }
+        }
+    }
+
+    private suspend fun setup(gatt: BluetoothGatt): String {
+        val serviceChanged = gatt.getService(GENERIC_ATTRIBUTE)
+            ?.getCharacteristic(SERVICE_CHANGED)
+        if (serviceChanged?.getDescriptor(CCCD) != null) subscribe(gatt, serviceChanged)
+
+        val ancs = gatt.getService(ANCS_SERVICE)
+        val ams = gatt.getService(AMS_SERVICE)
+        if (ancs == null && ams == null) {
+            throw GattFailure("Selected device does not expose ANCS or AMS; check iPhone sharing settings")
+        }
+        if (ancs != null) {
+            subscribe(gatt, characteristic(gatt, ANCS_SERVICE, ANCS_DATA_SOURCE))
+            subscribe(gatt, characteristic(gatt, ANCS_SERVICE, ANCS_NOTIFICAITON_SOURCE))
         } else {
-            Log.i("ANCSDiscover", "ANCS could not be found on the scanned device.")
-            return
+            Log.w("ANCS", "iPhone notification service is not available")
         }
-
-        val amsService = gatt.services.firstOrNull { it.uuid == AMS_SERVICE }
-        if (amsService == null) {
-            Log.i("AMS", "AMS not found on connected device")
-            amsClient.setAvailable(false)
-            return
+        if (ams != null) {
+            val remote = ams.getCharacteristic(AMS_REMOTE_COMMAND)
+            if (remote != null && remote.getDescriptor(CCCD) != null) subscribe(gatt, remote)
+            val update = ams.getCharacteristic(AMS_ENTITY_UPDATE)
+            if (update != null && update.getDescriptor(CCCD) != null) {
+                subscribe(gatt, update)
+                registerMedia(gatt, update)
+                amsClient.setAvailable(true)
+            } else {
+                Log.w("AMS", "iPhone does not expose media updates")
+            }
         }
-        amsClient.setAvailable(true)
-        val entityUpdate = amsService.getCharacteristic(AMS_ENTITY_UPDATE)
-        val cccd = entityUpdate?.getDescriptor(CCCD_UUID)
-        if (entityUpdate == null || cccd == null) {
-            Log.e("AMS", "AMS Entity Update characteristic or CCCD missing")
-            amsClient.setAvailable(false)
-            return
+        return when {
+            ancs == null -> "Connected; notifications unavailable; check iPhone sharing settings"
+            !amsClient.state.value.available -> "Connected; media unavailable"
+            else -> "Connected"
         }
-        if (!gatt.setCharacteristicNotification(entityUpdate, true)) {
-            Log.e("AMS", "Failed to enable local AMS Entity Update notifications")
-            amsClient.setAvailable(false)
-            return
-        }
-        enqueueDescWrite(cccd)
     }
 
-    override fun onPhyUpdate(gatt: BluetoothGatt?, txPhy: Int, rxPhy: Int, status: Int) {
-        Log.i("ANCSDiscover", "PHY: TX: $txPhy | RX: $rxPhy | status$status")
+    private suspend fun registerMedia(gatt: BluetoothGatt, update: BluetoothGattCharacteristic) {
+        write(gatt, update, byteArrayOf(AMSEntityID.Track.b,
+            AMSTrackAttributeID.Artist.b, AMSTrackAttributeID.Title.b))
+        write(gatt, update, byteArrayOf(AMSEntityID.Player.b, AMSPlayerAttributeID.PlaybackInfo.b))
     }
+
+    private fun characteristic(gatt: BluetoothGatt, service: UUID, uuid: UUID): BluetoothGattCharacteristic =
+        gatt.getService(service)?.getCharacteristic(uuid)
+            ?: throw GattFailure("Missing Bluetooth characteristic $uuid")
+
+    private suspend fun subscribe(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        enabled: Boolean = true
+    ) {
+        val descriptor = characteristic.getDescriptor(CCCD)
+            ?: throw GattFailure("Missing subscription descriptor for ${characteristic.uuid}")
+        if (enabled && !gatt.setCharacteristicNotification(characteristic, true)) {
+            throw GattFailure("Could not enable local notifications for ${characteristic.uuid}")
+        }
+        val value = when {
+            !enabled -> BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0 ->
+                BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            else -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        }
+        awaitCallback(CallbackKind.DESCRIPTOR, characteristic.uuid) {
+            gatt.writeDescriptor(descriptor, value) == BluetoothStatusCodes.SUCCESS
+        }
+    }
+
+    private suspend fun write(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        data: ByteArray
+    ) {
+        val type = when {
+            characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0 ->
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0 ->
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            else -> throw GattFailure("Bluetooth characteristic is not writable: ${characteristic.uuid}")
+        }
+        // Android reports local write completion even for WRITE_TYPE_NO_RESPONSE.
+        awaitCallback(CallbackKind.WRITE, characteristic.uuid) {
+            gatt.writeCharacteristic(characteristic, data, type) == BluetoothStatusCodes.SUCCESS
+        }
+    }
+
+    private suspend fun awaitCallback(
+        kind: CallbackKind,
+        uuid: UUID? = null,
+        start: () -> Boolean
+    ): ByteArray {
+        check(pendingCallback == null)
+        val pending = PendingCallback(kind, uuid, CompletableDeferred())
+        pendingCallback = pending
+        try {
+            if (!start()) throw GattFailure("Could not start Bluetooth $kind operation")
+            return withTimeout(10_000) { pending.result.await() }
+        } finally {
+            if (pendingCallback === pending) pendingCallback = null
+        }
+    }
+
+    private fun complete(
+        gatt: BluetoothGatt,
+        kind: CallbackKind,
+        uuid: UUID?,
+        status: Int,
+        value: ByteArray = byteArrayOf()
+    ) {
+        scope.launch {
+            if (gatt !== this@ANCSGattServiceClient.gatt) return@launch
+            val pending = pendingCallback
+            if (pending == null || pending.kind != kind || pending.uuid != uuid) {
+                Log.w("ANCS", "Ignoring unmatched Bluetooth callback: $kind $uuid")
+                return@launch
+            }
+            if (status == BluetoothGatt.GATT_SUCCESS) pending.result.complete(value)
+            else pending.result.completeExceptionally(GattStatusFailure(status))
+        }
+    }
+
+    override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) =
+        complete(gatt, CallbackKind.SERVICES, null, status)
+
+    override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) =
+        complete(gatt, CallbackKind.DESCRIPTOR, descriptor.characteristic.uuid, status)
+
+    override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) =
+        complete(gatt, CallbackKind.WRITE, characteristic.uuid, status)
 
     override fun onCharacteristicRead(
-        gatt: BluetoothGatt,
-        characteristic: BluetoothGattCharacteristic,
-        value: ByteArray,
-        status: Int
-    ) {
-        Log.i("ANCSDiscover", "VALUE READ: ${value.toString()}")
+        gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int
+    ) = complete(gatt, CallbackKind.READ, characteristic.uuid, status, value.copyOf())
+
+    private fun enqueue(operation: Operation) {
+        if (queue?.trySend(operation)?.isSuccess != true) {
+            reconnect("Bluetooth request queue is unavailable or full")
+        }
     }
 
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
-    override fun onCharacteristicWrite(
-        gatt: BluetoothGatt?,
-        characteristic: BluetoothGattCharacteristic?,
-        status: Int
-    ) {
-        when (amsSetupPhase) {
-            AMSSetupPhase.TRACK_PENDING -> {
-                if (gatt == null || characteristic == null) {
-                    Log.e("AMS", "Track subscription callback missing gatt/characteristic")
-                    amsSetupPhase = AMSSetupPhase.NONE
-                    scope.launch { lockCh.send(0) }
-                    return
-                }
-                if (status != BluetoothGatt.GATT_SUCCESS) {
-                    Log.e("AMS", "Track subscription write failed: $status")
-                    amsSetupPhase = AMSSetupPhase.NONE
-                    scope.launch { lockCh.send(0) }
-                    return
-                }
-                if (!writeAmsSubscriptionDirect(gatt, playerSubscriptionPayload, AMSSetupPhase.PLAYER_PENDING)) {
-                    amsClient.setAvailable(false)
-                    amsSetupPhase = AMSSetupPhase.NONE
-                    scope.launch { lockCh.send(0) }
-                }
-                return
-            }
-
-            AMSSetupPhase.PLAYER_PENDING -> {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i("AMS", "AMS setup complete")
-                } else {
-                    Log.e("AMS", "Player subscription write failed: $status")
-                }
-                amsSetupPhase = AMSSetupPhase.NONE
-                scope.launch { lockCh.send(0) }
-                return
-            }
-
-            AMSSetupPhase.NONE -> {}
+    private fun scheduleNotification() {
+        if (requestedNotifications.isNotEmpty() && !notificationQueued) {
+            notificationQueued = true
+            enqueue(Operation.Notification)
         }
-
-        if (characteristic == null) {
-            Log.i("ANCSDiscovery", "Char write status was $status but characteristic not found")
-            scope.launch { lockCh.send(0) }
-            return
-        }
-        if (status == BluetoothGatt.GATT_SUCCESS) {
-            Log.i("ANCSDiscovery", "Successfully wrote to characteristic ${characteristic.uuid}")
-        } else {
-            Log.i("ANCSDiscovery", "Problem writing to characteristic: ${status.toString(16)}")
-        }
-        scope.launch { lockCh.send(0) }
     }
 
-    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    override fun onDescriptorWrite(
-        gatt: BluetoothGatt?,
-        descriptor: BluetoothGattDescriptor?,
-        status: Int
-    ) {
-        if (gatt == null || descriptor == null || descriptor.uuid != CCCD_UUID) {
-            Log.i("ANCSDiscover", "Error occurred on descriptor write.")
-            scope.launch { lockCh.send(0) }
+    fun sendAMSCommand(command: Byte) {
+        val state = amsClient.state.value
+        if (!state.available || command !in state.supportedCommands) {
+            Log.w("AMS", "Cannot send unavailable media command $command")
+            onStatus("Media command unavailable")
             return
         }
-
-        val charUuid = descriptor.characteristic.uuid
-
-        if (awaitingResubscribeEnable && charUuid == AMS_ENTITY_UPDATE) {
-            awaitingResubscribeEnable = false
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i("AMS", "Disabled AMS Entity Update subscription, re-enabling to force a fresh Track push")
-                gatt.writeDescriptor(descriptor, CCCD_SUB_NOTIFICATIONS)
-            } else {
-                Log.e("AMS", "Failed to disable AMS Entity Update subscription for refresh: $status")
-            }
-            return
-        }
-
-        if (status != BluetoothGatt.GATT_SUCCESS) {
-            Log.i("ANCSDiscover", "Failed to subscribe to char because of code $status")
-            if (charUuid == AMS_ENTITY_UPDATE) {
-                amsSetupPhase = AMSSetupPhase.NONE
-            }
-            scope.launch { lockCh.send(0) }
-            return
-        }
-
-        Log.i("ANCSDiscover", "Successfully subscribed to char: $charUuid")
-        if (charUuid == ANCS_NOTIFICAITON_SOURCE) {
-            subscribedNotifSource = true
-        }
-        if (charUuid == ANCS_DATA_SOURCE) {
-            subscribedDataSource = true
-        }
-        fullySubscribed.set(subscribedNotifSource && subscribedDataSource)
-        if (fullySubscribed.get()) {
-            Log.i("ANCSDiscover", "Fully subscribed!")
-        }
-
-        if (charUuid == AMS_ENTITY_UPDATE) {
-            if (!writeAmsSubscriptionDirect(gatt, trackSubscriptionPayload, AMSSetupPhase.TRACK_PENDING)) {
-                amsClient.setAvailable(false)
-                amsSetupPhase = AMSSetupPhase.NONE
-                scope.launch { lockCh.send(0) }
-            }
-            return
-        }
-
-        scope.launch { lockCh.send(0) }
+        enqueue(Operation.Command(command))
     }
 
-    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
-    @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS])
+    private suspend fun receiveNotification(gatt: BluetoothGatt, uid: ByteArray) {
+        val key = uid.notificationUid()
+        requestedNotifications.remove(key)
+        if (!client.contains(uid)) return
+        val pending = PendingNotification(ANCSResponse(uid), CompletableDeferred())
+        pendingNotification = pending
+        try {
+            val attributes = byteArrayOf(0, 1, 0xff.toByte(), 1, 2, 0xff.toByte(), 1, 3, 0xff.toByte(), 1)
+            write(gatt, characteristic(gatt, ANCS_SERVICE, ANCS_CONTROL_POINT),
+                byteArrayOf(0) + uid + attributes)
+            val response = withTimeout(10_000) { pending.result.await() }
+            client.onAttributes(uid, response)
+        } catch (error: GattStatusFailure) {
+            // A notification can disappear on the phone before its queued request reaches it.
+            if (error.status != 0xa2) throw error
+            Log.w("ANCS", "iPhone no longer has the requested notification")
+        } finally {
+            if (pendingNotification === pending) pendingNotification = null
+        }
+    }
+
+    private suspend fun readAttribute(gatt: BluetoothGatt, operation: Operation.Attribute) {
+        val key = operation.entity to operation.attribute
+        if (attributeVersions[key] != operation.version) return
+        val attribute = gatt.getService(AMS_SERVICE)?.getCharacteristic(AMS_ENTITY_ATTRIBUTE)
+        if (attribute == null) {
+            Log.w("AMS", "Full media attribute reads are not supported by the iPhone")
+            onStatus("iPhone supplied shortened media information")
+            return
+        }
+        try {
+            write(gatt, attribute, byteArrayOf(operation.entity, operation.attribute))
+            val value = awaitCallback(CallbackKind.READ, attribute.uuid) { gatt.readCharacteristic(attribute) }
+            if (attributeVersions[key] == operation.version) {
+                amsClient.onEntityUpdate(byteArrayOf(operation.entity, operation.attribute, 0) + value)
+            }
+        } catch (error: GattStatusFailure) {
+            if (error.status != 0xa2) throw error
+            Log.w("AMS", "Requested media attribute is absent")
+        }
+    }
+
     override fun onCharacteristicChanged(
-        gatt: BluetoothGatt,
-        characteristic: BluetoothGattCharacteristic,
-        cvalue: ByteArray
+        gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray
     ) {
-        val value = cvalue
-        if (characteristic.uuid == ANCS_NOTIFICAITON_SOURCE) {
-            if (value.size < 8) {
-                Log.e("ANCSDiscover", "Notification Source payload too short: ${value.size}")
-                return
-            }
-            val notifUuid = byteArrayOf(value[4], value[5], value[6], value[7])
-
-            if (client.onNotificationSource(value[0], value[1], value[2], value[3], notifUuid)) {
-                val ctrlChar = characteristic.service.getCharacteristic(ANCS_CONTROL_POINT)
-                if (ctrlChar == null) {
-                    Log.e("ANCSCtrlPoint", "Could not get Control Point. Dropping request.")
-                    return
+        val data = value.copyOf()
+        scope.launch {
+            if (gatt !== this@ANCSGattServiceClient.gatt) return@launch
+            when (characteristic.uuid) {
+                ANCS_NOTIFICAITON_SOURCE -> {
+                    if (data.size != 8) {
+                        reconnect("Invalid ANCS notification event")
+                        return@launch
+                    }
+                    val uid = data.copyOfRange(4, 8)
+                    if (client.onNotificationSource(data[0], data[1], data[2], uid)) {
+                        requestedNotifications[uid.notificationUid()] = uid
+                    }
+                    requestedNotifications.entries.removeAll { !client.contains(it.value) }
+                    scheduleNotification()
                 }
-                val charWrite = WriteQueueItem(
-                    ctrlChar,
-                    client.getNotificationAttributes(
-                        notifUuid,
-                        byteArrayOf(
-                            NotificationAttributeID.AppIdentifier.b,
-                            NotificationAttributeID.Title.b,
-                            0xff.toByte(),
-                            0x01.toByte(),
-                            NotificationAttributeID.Subtitle.b,
-                            0xff.toByte(),
-                            0x01.toByte(),
-                            NotificationAttributeID.Message.b,
-                            0xff.toByte(),
-                            0x01.toByte(),
-                        )
-                    )
-                )
-                enqueueAncsCharWrite(charWrite)
+                ANCS_DATA_SOURCE -> {
+                    val pending = pendingNotification
+                    if (pending == null) {
+                        Log.w("ANCS", "Ignoring notification data without an active request")
+                        return@launch
+                    }
+                    try {
+                        pending.response.append(data)?.let { pending.result.complete(it) }
+                    } catch (error: IllegalArgumentException) {
+                        pending.result.completeExceptionally(GattFailure(error.message ?: "Invalid ANCS response"))
+                    }
+                }
+                AMS_REMOTE_COMMAND -> amsClient.onSupportedCommands(data)
+                AMS_ENTITY_UPDATE -> {
+                    if (data.size < 3) {
+                        Log.w("AMS", "Ignoring incomplete media update")
+                        return@launch
+                    }
+                    val key = data[0] to data[1]
+                    val version = (attributeVersions[key] ?: 0) + 1
+                    attributeVersions[key] = version
+                    amsClient.onEntityUpdate(data)
+                    if (data[2].toInt() and 1 != 0) {
+                        enqueue(Operation.Attribute(data[0], data[1], version))
+                    }
+                }
+                SERVICE_CHANGED -> reconnect("iPhone services changed; rediscovering")
             }
         }
-
-        if (characteristic.uuid == ANCS_DATA_SOURCE) {
-            dataSourceBuffer += cvalue
-            if (dataSourceBuffer.size < 5) return
-
-            val cmdId = CommandID.fromByte(dataSourceBuffer[0])
-            val notifUuid = byteArrayOf(dataSourceBuffer[1], dataSourceBuffer[2], dataSourceBuffer[3], dataSourceBuffer[4])
-            val attributes = dataSourceBuffer.copyOfRange(5, dataSourceBuffer.size)
-
-            if (client.onDataSource(cmdId, notifUuid, attributes)) {
-                dataSourceBuffer = ByteArray(0)
-            }
-        }
-
-        if (characteristic.uuid == AMS_ENTITY_UPDATE) {
-            amsClient.onEntityUpdate(value)
-        }
     }
 
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    fun sendAMSCommand(commandId: Byte) {
-        val gatt = connectedGatt
-        if (gatt == null) {
-            Log.e("AMS", "Cannot send command: no active GATT connection")
-            return
-        }
-        val amsService = gatt.getService(AMS_SERVICE)
-        if (amsService == null) {
-            Log.e("AMS", "Cannot send command: AMS service missing")
-            return
-        }
-        val remoteCommand = amsService.getCharacteristic(AMS_REMOTE_COMMAND)
-        if (remoteCommand == null) {
-            Log.e("AMS", "Cannot send command: Remote Command characteristic missing")
-            return
-        }
-        val hasWrite = (remoteCommand.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
-        val hasWriteNoResponse = (remoteCommand.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-        val writeType = when {
-            hasWrite -> BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            hasWriteNoResponse -> BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            else -> {
-                Log.e("AMS", "Cannot send command: Remote Command characteristic not writable")
-                return
-            }
-        }
-        val expectsCallback = writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        enqueueAmsCharWrite(
-            WriteQueueItem(
-                char = remoteCommand,
-                data = byteArrayOf(commandId),
-                writeType = writeType,
-                expectsCallback = expectsCallback
-            )
-        )
-    }
-
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    private fun writeAmsSubscriptionDirect(
-        gatt: BluetoothGatt,
-        payload: ByteArray,
-        nextPhase: AMSSetupPhase
-    ): Boolean {
-        val amsService = gatt.getService(AMS_SERVICE)
-        val entityUpdate = amsService?.getCharacteristic(AMS_ENTITY_UPDATE)
-        if (entityUpdate == null) {
-            Log.e("AMS", "AMS Entity Update characteristic missing")
-            return false
-        }
-        val result = gatt.writeCharacteristic(entityUpdate, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-        if (result != BluetoothGatt.GATT_SUCCESS) {
-            Log.e("AMS", "AMS subscription write failed to start: code=$result")
-            return false
-        }
-        amsSetupPhase = nextPhase
-        return true
-    }
-
-    private fun enqueueDescWrite(cccd: BluetoothGattDescriptor) {
-        if (queue.trySend(QueueItem.DescWrite(cccd)).isFailure) {
-            Log.e("ANCSQueue", "Failed to enqueue descriptor write item")
-        }
-    }
-
-    private fun enqueueAncsCharWrite(item: WriteQueueItem) {
-        if (queue.trySend(QueueItem.AncsCharWrite(item)).isFailure) {
-            Log.e("ANCSQueue", "Failed to enqueue ANCS char write item")
-        }
-    }
-
-    private fun enqueueAmsCharWrite(item: WriteQueueItem) {
-        if (queue.trySend(QueueItem.AmsCharWrite(item)).isFailure) {
-            Log.e("AMSQueue", "Failed to enqueue AMS char write item")
-        }
+    companion object {
+        private val CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+        private val GENERIC_ATTRIBUTE = UUID.fromString("00001801-0000-1000-8000-00805f9b34fb")
+        private val SERVICE_CHANGED = UUID.fromString("00002a05-0000-1000-8000-00805f9b34fb")
     }
 }

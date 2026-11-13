@@ -17,8 +17,12 @@ guava = "33.2.1-android"
 tilesTooling = "1.5.0"
 tilesToolingPreview = "1.5.0"
 watchfaceComplicationsDataSourceKtx = "1.2.1"
+junit = "4.13.2"
+robolectric = "4.16.1"
 
 [libraries]
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 play-services-wearable = { group = "com.google.android.gms", name = "play-services-wearable", version.ref = "playServicesWearable" }
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 ui = { group = "androidx.compose.ui", name = "ui" }

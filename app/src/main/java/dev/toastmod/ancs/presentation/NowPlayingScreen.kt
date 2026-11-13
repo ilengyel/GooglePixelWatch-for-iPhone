@@ -44,10 +44,6 @@ fun NowPlayingScreen(
     onPreviousTrack: () -> Unit,
     onNextTrack: () -> Unit
 ) {
-    val hasTrackData = state.track.hasData
-    val controlsEnabled = state.available || hasTrackData
-    val trackKey = "${state.track.title} ${state.track.artist} ${state.track.album}"
-
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -79,10 +75,11 @@ fun NowPlayingScreen(
 
             Box(modifier = Modifier.weight(1f).clipToBounds()) {
                 AnimatedContent(
-                    targetState = trackKey,
+                    targetState = state.track,
                     transitionSpec = { fadeIn() togetherWith fadeOut() },
                     label = "track_change"
-                ) {
+                ) { track ->
+                    val hasTrackData = track.hasData
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -95,14 +92,7 @@ fun NowPlayingScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                         } else if (!hasTrackData && state.player.isPlaying) {
-                            // Player and Track arrive as separate AMS notifications - Player's
-                            // single "is playing" push routinely lands before Track's four
-                            // attributes (title/artist/album/duration) finish streaming in,
-                            // especially for a song that was already playing before the watch
-                            // connected. Trust the player state we do have instead of showing
-                            // the contradictory "Nothing playing" while the buttons already say
-                            // otherwise; this clears itself the moment the first track attribute
-                            // arrives, no AMS/BLE changes needed.
+                            // Playback state can arrive before title and artist.
                             Text(
                                 text = "Loading track info…",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -117,9 +107,9 @@ fun NowPlayingScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                         } else {
-                            MarqueeText(text = state.track.title.ifBlank { "Unknown title" })
+                            MarqueeText(text = track.title.ifBlank { "Unknown title" })
                             MarqueeText(
-                                text = state.track.artist.ifBlank { "Unknown artist" },
+                                text = track.artist.ifBlank { "Unknown artist" },
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -156,7 +146,7 @@ fun NowPlayingScreen(
 
             FilledTonalIconButton(
                 onClick = onPreviousTrack,
-                enabled = controlsEnabled,
+                enabled = state.available && AMSCommand.PREVIOUS_TRACK in state.supportedCommands,
                 shapes = IconButtonDefaults.animatedShapes(),
                 modifier = Modifier.requiredSize(skipButtonSize)
             ) {
@@ -169,7 +159,7 @@ fun NowPlayingScreen(
             IconToggleButton(
                 checked = state.player.isPlaying,
                 onCheckedChange = { onTogglePlayPause() },
-                enabled = controlsEnabled,
+                enabled = state.available && AMSCommand.TOGGLE_PLAY_PAUSE in state.supportedCommands,
                 shapes = IconToggleButtonDefaults.variantAnimatedShapes(),
                 modifier = Modifier.requiredSize(playPauseButtonSize)
             ) {
@@ -181,7 +171,7 @@ fun NowPlayingScreen(
             }
             FilledTonalIconButton(
                 onClick = onNextTrack,
-                enabled = controlsEnabled,
+                enabled = state.available && AMSCommand.NEXT_TRACK in state.supportedCommands,
                 shapes = IconButtonDefaults.animatedShapes(),
                 modifier = Modifier.requiredSize(skipButtonSize)
             ) {

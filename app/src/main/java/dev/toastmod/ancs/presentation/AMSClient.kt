@@ -21,7 +21,7 @@ enum class AMSEntityID(val b: Byte) {
     Player(0), Queue(1), Track(2);
 
     companion object {
-        fun fromByte(b: Byte): AMSEntityID = entries.firstOrNull { it.b == b } ?: Player
+        fun fromByte(b: Byte): AMSEntityID? = entries.firstOrNull { it.b == b }
     }
 }
 
@@ -52,7 +52,8 @@ data class AMSPlayerInfo(
 data class AMSState(
     val available: Boolean = false,
     val track: AMSTrackInfo = AMSTrackInfo(),
-    val player: AMSPlayerInfo = AMSPlayerInfo()
+    val player: AMSPlayerInfo = AMSPlayerInfo(),
+    val supportedCommands: Set<Byte> = emptySet()
 )
 
 class AMSClient {
@@ -68,6 +69,10 @@ class AMSClient {
         _state.value = AMSState()
     }
 
+    fun onSupportedCommands(commands: ByteArray) {
+        _state.value = _state.value.copy(supportedCommands = commands.toSet())
+    }
+
     /**
      * Called when a notification arrives on the AMS Entity Update characteristic.
      * Format: EntityID(1) | AttributeID(1) | EntityUpdateFlags(1) | Value(UTF-8 string)
@@ -79,9 +84,7 @@ class AMSClient {
         }
         val entityId = AMSEntityID.fromByte(data[0])
         val attributeId = data[1]
-        // data[2] = EntityUpdateFlags (bit 0 = Truncated)
         val value = if (data.size > 3) data.copyOfRange(3, data.size).decodeToString() else ""
-        Log.i("AMS", "EntityUpdate: entity=$entityId attr=$attributeId value=\"$value\"")
 
         when (entityId) {
             AMSEntityID.Track -> {
@@ -98,16 +101,22 @@ class AMSClient {
 
             AMSEntityID.Player -> {
                 if (attributeId == AMSPlayerAttributeID.PlaybackInfo.b) {
-                    // "playbackState,playbackRate,elapsedTime"  state: 0=paused 1=playing
                     val parts = value.split(",")
-                    if (parts.size >= 3) {
+                    val playbackState = parts.getOrNull(0)?.toIntOrNull()
+                    val rate = parts.getOrNull(1)?.toFloatOrNull()
+                    val elapsed = parts.getOrNull(2)?.toFloatOrNull()
+                    if (playbackState != null && playbackState in 0..3 && rate != null && rate.isFinite() &&
+                        elapsed != null && elapsed.isFinite()
+                    ) {
                         _state.value = _state.value.copy(
                             player = AMSPlayerInfo(
-                                isPlaying = (parts[0].toIntOrNull() ?: 0) == 1,
-                                playbackRate = parts[1].toFloatOrNull() ?: 1f,
-                                elapsedTime = parts[2].toFloatOrNull() ?: 0f
+                                isPlaying = playbackState == 1,
+                                playbackRate = rate,
+                                elapsedTime = elapsed
                             )
                         )
+                    } else {
+                        Log.w("AMS", "Invalid playback information")
                     }
                 }
             }
