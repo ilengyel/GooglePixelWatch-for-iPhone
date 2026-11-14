@@ -6,8 +6,8 @@ plugins {
 android {
     namespace = "dev.toastmod.ancs"
     compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
+        version = release(37) {
+            minorApiLevel = 2
         }
     }
 
@@ -45,6 +45,7 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.mockito.core)
     testImplementation(libs.kotlinx.coroutines.test)
+    implementation(libs.kotlinx.coroutines.android)
     implementation(libs.guava)
     implementation(libs.play.services.wearable)
     implementation(platform(libs.compose.bom))

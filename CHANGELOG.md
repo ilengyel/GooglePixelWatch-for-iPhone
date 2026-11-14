@@ -16,6 +16,9 @@ for each app version.
 
 - ANCS and AMS connection handling, reconnects, and notification lifecycle
   behavior.
+- Updated Android Gradle plugin, Kotlin/Compose, Wear libraries, coroutines,
+  Guava, and test dependencies to current stable releases.
+- Raised compile SDK to 37.2 for Compose; minimum and target SDKs are unchanged.
 
 ### Tests
 

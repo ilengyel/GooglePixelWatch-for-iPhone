@@ -5,11 +5,11 @@ This workflow builds and installs the app from VS Code without Android Studio.
 ## Requirements
 
 - VS Code and a full JDK 21 installation (not a JRE).
-- Android SDK command-line tools, Android API 36.1, build-tools 36.0.0, and
+- Android SDK command-line tools, Android API 37.2, build-tools 36.0.0, and
   platform-tools. For current command-line tools, install the SDK components:
 
   ```powershell
-  android --no-metrics sdk install "platform-tools" "platforms;android-36.1" "build-tools;36.0.0"
+  android --no-metrics sdk install "platform-tools" "platforms;android-37.2" "build-tools;36.0.0"
   ```
 
   Accept the SDK licenses when prompted. With older command-line tools, use
