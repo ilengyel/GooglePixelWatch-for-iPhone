@@ -260,8 +260,7 @@ class MainActivity : ComponentActivity() {
                     selected = isSelected,
                     forgetting = forgetInProgress,
                     message = diagnosticMessage,
-                    onForget = { confirmForget(phone) },
-                    onBack = { diagnosticPhone = null }
+                    onForget = { confirmForget(phone) }
                 )
             } else if (choices != null) {
                 PhoneConnectionListScreen(
@@ -274,8 +273,7 @@ class MainActivity : ComponentActivity() {
                         phoneChoices = null
                         startAndBind()
                     },
-                    onInfo = { device -> showConnectionInfo(device) },
-                    onBack = { phoneChoices = null }
+                    onInfo = { device -> showConnectionInfo(device) }
                 )
             } else WearApp(
                 amsState = service?.mediaState ?: disconnectedState,
