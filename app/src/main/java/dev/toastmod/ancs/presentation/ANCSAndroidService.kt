@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothDevice
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -19,15 +20,21 @@ import androidx.core.app.ServiceCompat
 import dev.toastmod.ancs.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import java.lang.reflect.InvocationTargetException
 
 class ANCSAndroidService : Service() {
     private val amsClient = AMSClient()
     val mediaState = amsClient.state
     private val mutableStatus = MutableStateFlow("Disconnected")
     val status = mutableStatus.asStateFlow()
+    private val mutableConnectionState = MutableStateFlow(PhoneConnectionState.DISCONNECTED)
+    val connectionState = mutableConnectionState.asStateFlow()
     private val binder = LocalBinder()
     private var gattClient: ANCSGattServiceClient? = null
     private var targetAddress: String? = null
+    private var forgettingPhone = false
 
     inner class LocalBinder : Binder() {
         fun getService(): ANCSAndroidService = this@ANCSAndroidService
@@ -44,6 +51,7 @@ class ANCSAndroidService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (forgettingPhone) return START_NOT_STICKY
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
             PackageManager.PERMISSION_GRANTED ||
             ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -60,7 +68,7 @@ class ANCSAndroidService : Service() {
             NotificationChannel(SERVICE_CHANNEL, "ANCS connection", NotificationManager.IMPORTANCE_LOW)
         )
         val notification = NotificationCompat.Builder(this, SERVICE_CHANNEL)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_phone)
             .setContentTitle("iPhone connection")
             .setContentText("Receiving notifications and media information")
             .setOngoing(true)
@@ -98,9 +106,11 @@ class ANCSAndroidService : Service() {
                 setShowBadge(false)
             }
         manager.createNotificationChannel(channel)
-        gattClient = ANCSGattServiceClient(this, device, ANCSClient(this, channel), amsClient) {
-            mutableStatus.value = it
-        }.also { it.connect() }
+        gattClient = ANCSGattServiceClient(
+            this, device, ANCSClient(this, channel), amsClient,
+            onStatus = { mutableStatus.value = it },
+            onConnectionState = { mutableConnectionState.value = it }
+        ).also { it.connect() }
         return START_STICKY
     }
 
@@ -115,6 +125,67 @@ class ANCSAndroidService : Service() {
         client.sendAMSCommand(command)
     }
 
+    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+    internal suspend fun forgetSelectedPhone(
+        address: String,
+        removeBond: (BluetoothDevice) -> Boolean = ::requestBondRemoval
+    ) {
+        check(!forgettingPhone) { "A forget request is already in progress" }
+        val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+        check(preferences.getString(TARGET_ADDRESS, null) == address) {
+            "The selected phone has changed; reopen connection information"
+        }
+        val adapter = getSystemService(BluetoothManager::class.java).adapter
+        check(adapter != null && adapter.isEnabled) { "Enable Bluetooth before forgetting the phone" }
+        val device = adapter.bondedDevices.firstOrNull { it.address == address }
+            ?: adapter.getRemoteDevice(address)
+        forgettingPhone = true
+        closeClient()
+        mutableStatus.value = "Forgetting selected phone"
+        try {
+            if (device.bondState != BluetoothDevice.BOND_NONE) {
+                check(removeBond(device)) { "Android rejected the individual unpair request" }
+                val removed = withTimeoutOrNull(15_000) {
+                    while (device.bondState != BluetoothDevice.BOND_NONE) delay(250)
+                    true
+                }
+                check(removed == true) {
+                    "Unpair was requested, but removal was not confirmed. Check Bluetooth settings before retrying"
+                }
+            }
+            check(preferences.edit().remove(TARGET_ADDRESS).commit()) {
+                "Pairing removed, but the saved phone selection could not be cleared"
+            }
+            mutableStatus.value = "Phone forgotten; pair again in Bluetooth settings"
+            stopSelf()
+        } catch (error: IllegalStateException) {
+            Log.e("ANCS", "Could not forget selected phone", error)
+            mutableStatus.value = error.message ?: "Could not forget selected phone"
+            throw error
+        } catch (error: SecurityException) {
+            Log.e("ANCS", "Unpair permission denied", error)
+            mutableStatus.value = "Android denied permission to forget this phone"
+            throw error
+        } finally {
+            forgettingPhone = false
+        }
+    }
+
+    @android.annotation.SuppressLint("PrivateApi")
+    private fun requestBondRemoval(device: BluetoothDevice): Boolean {
+        try {
+            return BluetoothDevice::class.java.getMethod("removeBond").invoke(device) == true
+        } catch (error: NoSuchMethodException) {
+            throw IllegalStateException("Individual unpair is unavailable on this watch", error)
+        } catch (error: IllegalAccessException) {
+            throw IllegalStateException("Android blocked access to individual unpair", error)
+        } catch (error: InvocationTargetException) {
+            throw IllegalStateException(
+                "Individual unpair failed: ${error.cause?.message ?: error.message}", error
+            )
+        }
+    }
+
     override fun onDestroy() {
         closeClient()
         mutableStatus.value = "Disconnected"
@@ -125,6 +196,7 @@ class ANCSAndroidService : Service() {
         gattClient?.close()
         gattClient = null
         targetAddress = null
+        mutableConnectionState.value = PhoneConnectionState.DISCONNECTED
     }
 
     companion object {

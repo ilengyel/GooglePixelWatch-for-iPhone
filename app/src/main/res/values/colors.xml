@@ -1,0 +1,6 @@
+<resources>
+    <color name="phone_connected">#65D98C</color>
+    <color name="phone_connecting">#F6C65B</color>
+    <color name="phone_disconnected">#FF6B6B</color>
+    <color name="phone_launcher_background">#10181A</color>
+</resources>

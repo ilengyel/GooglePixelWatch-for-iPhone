@@ -21,7 +21,7 @@ class ANCSNotification(
         val text = listOf(attributes.subtitle, attributes.message)
             .filter { it.isNotBlank() }.joinToString("\n")
         val notification = NotificationCompat.Builder(context, channel.id)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_phone)
             .setContentTitle(attributes.title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))

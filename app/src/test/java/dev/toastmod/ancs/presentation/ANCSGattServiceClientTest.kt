@@ -34,6 +34,7 @@ class ANCSGattServiceClientTest {
     private lateinit var notifications: ANCSClient
     private lateinit var client: ANCSGattServiceClient
     private val statuses = mutableListOf<String>()
+    private val connectionStates = mutableListOf<PhoneConnectionState>()
     private val context = RuntimeEnvironment.getApplication()
     private val manager = context.getSystemService(NotificationManager::class.java)
 
@@ -46,7 +47,8 @@ class ANCSGattServiceClientTest {
         val channel = NotificationChannel("test", "Test", NotificationManager.IMPORTANCE_DEFAULT)
         manager.createNotificationChannel(channel)
         notifications = ANCSClient(context, channel)
-        client = ANCSGattServiceClient(context, phone.device, notifications, media, statuses::add)
+        client = ANCSGattServiceClient(context, phone.device, notifications, media,
+            statuses::add, connectionStates::add)
         scheduler.runCurrent()
     }
 
@@ -103,6 +105,36 @@ class ANCSGattServiceClientTest {
             it.value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE) }
 
     @Test
+    fun connectionIndicatorWaitsForSetupAndTracksDisconnectRetryAndClose() {
+        val first = startConnection()
+        assertEquals(PhoneConnectionState.CONNECTING, connectionStates.last())
+        drain(first)
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
+
+        disconnect(first)
+        assertEquals(PhoneConnectionState.DISCONNECTED, connectionStates.last())
+        advance(999)
+        assertEquals(PhoneConnectionState.DISCONNECTED, connectionStates.last())
+        advance(1)
+        assertEquals(PhoneConnectionState.CONNECTING, connectionStates.last())
+        val next = phone.connections.last()
+        next.callback.onConnectionStateChange(next.gatt, BluetoothGatt.GATT_SUCCESS,
+            BluetoothProfile.STATE_CONNECTED)
+        scheduler.runCurrent()
+        assertEquals(PhoneConnectionState.CONNECTING, connectionStates.last())
+        drain(next)
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
+
+        client.close()
+        assertEquals(PhoneConnectionState.DISCONNECTED, connectionStates.last())
+        val expectedStates = connectionStates.toList()
+        first.callback.onConnectionStateChange(first.gatt, BluetoothGatt.GATT_SUCCESS,
+            BluetoothProfile.STATE_CONNECTED)
+        advance(120_000)
+        assertEquals(expectedStates, connectionStates)
+    }
+
+    @Test
     fun reconnectBackoffCapsAtSixtySecondsAndResetsAfterSetup() {
         client.connect()
         for (wait in listOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 32_000L, 60_000L, 60_000L)) {
@@ -143,14 +175,17 @@ class ANCSGattServiceClientTest {
     @Test
     fun connectionTimeoutClosesTheGattAndRetries() {
         client.connect()
+        assertEquals(PhoneConnectionState.CONNECTING, connectionStates.last())
         val connection = phone.connections.single()
         advance(19_999)
         assertFalse(connection.closed)
         advance(1)
         assertTrue(connection.closed)
         assertEquals("Bluetooth connection timed out; retrying in 1s", statuses.last())
+        assertEquals(PhoneConnectionState.DISCONNECTED, connectionStates.last())
         advance(1_000)
         assertEquals(2, phone.connections.size)
+        assertEquals(PhoneConnectionState.CONNECTING, connectionStates.last())
     }
 
     @Test
@@ -164,6 +199,7 @@ class ANCSGattServiceClientTest {
         scheduler.runCurrent()
         assertEquals("services", current.pending.single().kind)
         val expectedStatuses = statuses.toList()
+        val expectedStates = connectionStates.toList()
 
         old.finishNext()
         old.notify(old.update, byteArrayOf(2, 2, 0) + "Stale track".encodeToByteArray())
@@ -176,6 +212,7 @@ class ANCSGattServiceClientTest {
         assertEquals(AMSState(), media.state.value)
         assertFalse(notifications.contains(byteArrayOf(1, 0, 0, 0)))
         assertEquals(expectedStatuses, statuses)
+        assertEquals(expectedStates, connectionStates)
         assertEquals("services", current.pending.single().kind)
         assertEquals(1, current.operations.size)
         drain(current)
@@ -325,6 +362,7 @@ class ANCSGattServiceClientTest {
         assertEquals(2, refreshCount(connection))
         advance(3_000)
         assertEquals("Connected; iPhone has not supplied track information", statuses.last())
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
         advance(60_000)
         drain(connection)
         assertEquals(2, refreshCount(connection))
@@ -396,6 +434,7 @@ class ANCSGattServiceClientTest {
         client.sendAMSCommand(2)
         scheduler.runCurrent()
         assertEquals("Media command unavailable", statuses.last())
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
         assertEquals(before, connection.operations.size)
 
         connection.notify(connection.remote, byteArrayOf(2, 3))
@@ -408,6 +447,7 @@ class ANCSGattServiceClientTest {
         connection.finishNext()
         scheduler.runCurrent()
         assertEquals("This media command is not supported by the iPhone", statuses.last())
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
         assertEquals(before + 1, connection.operations.size)
         assertTrue(connection.pending.isEmpty())
     }

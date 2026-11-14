@@ -26,13 +26,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
 
+enum class PhoneConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
+
 @SuppressLint("MissingPermission")
 class ANCSGattServiceClient(
     private val context: Context,
     private val device: BluetoothDevice,
     private val client: ANCSClient,
     private val amsClient: AMSClient,
-    private val onStatus: (String) -> Unit
+    private val onStatus: (String) -> Unit,
+    private val onConnectionState: (PhoneConnectionState) -> Unit = {}
 ) : BluetoothGattCallback() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var gatt: BluetoothGatt? = null
@@ -97,6 +100,7 @@ class ANCSGattServiceClient(
     fun connect() {
         if (gatt != null) return
         connectionJob?.cancel()
+        onConnectionState(PhoneConnectionState.CONNECTING)
         onStatus("Connecting to iPhone")
         try {
             gatt = device.connectGatt(context, false, this, BluetoothDevice.TRANSPORT_LE)
@@ -110,6 +114,7 @@ class ANCSGattServiceClient(
             }
         } catch (error: SecurityException) {
             Log.e("ANCS", "Bluetooth permission unavailable", error)
+            onConnectionState(PhoneConnectionState.DISCONNECTED)
             onStatus("Bluetooth permission required; reopen the app")
         }
     }
@@ -120,6 +125,7 @@ class ANCSGattServiceClient(
     }
 
     private fun disposeConnection() {
+        onConnectionState(PhoneConnectionState.DISCONNECTED)
         connectionJob?.cancel()
         sessionJob?.cancel()
         sessionJob = null
@@ -191,6 +197,7 @@ class ANCSGattServiceClient(
                 awaitCallback(CallbackKind.SERVICES) { gatt.discoverServices() }
                 connectedStatus = setup(gatt)
                 retryDelay = 1_000
+                onConnectionState(PhoneConnectionState.CONNECTED)
                 onStatus(connectedStatus)
                 for (operation in operations) {
                     when (operation) {

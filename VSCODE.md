@@ -64,3 +64,16 @@ connections fail, check for Wi-Fi client isolation or try a shared hotspot.
 Disable wireless debugging when finished. Bluetooth debugging is not supported
 on Wear OS 3+; see Google's
 [Wear OS wireless debugging guide](https://developer.android.com/training/wearables/get-started/debug-wifi).
+
+## iPhone connection diagnostics
+
+In ANCS, tap the phone icon to select a paired device. The selected radio button,
+Selected label, and Bluetooth address suffixes distinguish devices with the same name. Each connection
+row has an info icon that opens its diagnostics without changing the selection.
+Diagnostics show the full Bluetooth address.
+ANCS connection/media status and Forget are available for the selected phone only.
+
+**Forget phone** requires confirmation and attempts to remove only that Bluetooth
+bond. Android may block the system unpair API; failures are shown without resetting
+Bluetooth or the watch. The saved selection is cleared only after bond removal is
+confirmed. Unpairing the watch's setup phone may disrupt its companion connection.
