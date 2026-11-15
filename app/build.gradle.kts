@@ -37,6 +37,9 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
     useLibrary("wear-sdk")
 }
 
@@ -45,6 +48,7 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.mockito.core)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.ui.test.junit4)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.guava)
     implementation(libs.play.services.wearable)

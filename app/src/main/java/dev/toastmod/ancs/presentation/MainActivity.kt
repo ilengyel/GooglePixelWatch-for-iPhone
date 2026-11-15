@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Build
 import android.os.IBinder
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.ScreenScaffold
+import androidx.wear.compose.foundation.BasicSwipeToDismissBox
 import androidx.lifecycle.lifecycleScope
 import dev.toastmod.ancs.R
 import kotlinx.coroutines.launch
@@ -207,13 +210,14 @@ class MainActivity : ComponentActivity() {
     private var gattService by mutableStateOf<ANCSAndroidService?>(null)
     private val disconnectedState = MutableStateFlow(AMSState())
     private val disconnectedConnectionState = MutableStateFlow(PhoneConnectionState.DISCONNECTED)
+    private val notForgetting = MutableStateFlow(false)
     private val localStatus = MutableStateFlow("Select a paired iPhone")
     private var bound = false
     private var chooser: AlertDialog? = null
     private var diagnosticPhone by mutableStateOf<BluetoothDevice?>(null)
     private var phoneChoices by mutableStateOf<List<BluetoothDevice>?>(null)
     private var selectedPhoneAddress by mutableStateOf<String?>(null)
-    private var forgetInProgress by mutableStateOf(false)
+    private val forgetInProgress get() = gattService?.forgettingPhone?.value == true
     private var diagnosticMessage by mutableStateOf("")
     private val permissions = arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS)
     // ComponentActivity does not use FragmentActivity's legacy permission handling.
@@ -243,49 +247,57 @@ class MainActivity : ComponentActivity() {
             val connectionStatus by (service?.status ?: localStatus).collectAsState()
             val phoneConnectionState by
                 (service?.connectionState ?: disconnectedConnectionState).collectAsState()
+            val forgetting by (service?.forgettingPhone ?: notForgetting).collectAsState()
             val phone = diagnosticPhone
             val choices = phoneChoices
-            BackHandler(enabled = phone != null || choices != null) {
-                if (!forgetInProgress) {
+            PhoneScreenBackNavigation(
+                hasPreviousScreen = phone != null || choices != null,
+                navigationBlocked = forgetting,
+                onBack = {
                     if (phone != null) diagnosticPhone = null else phoneChoices = null
                 }
+            ) {
+                if (phone != null) {
+                    val isSelected = phone.address == selectedPhoneAddress
+                    PhoneDiagnosticsScreen(
+                        device = phone,
+                        connectionState = if (isSelected) phoneConnectionState else PhoneConnectionState.DISCONNECTED,
+                        status = if (isSelected) connectionStatus else getString(R.string.phone_not_selected),
+                        mediaState = if (isSelected) service?.mediaState ?: disconnectedState else disconnectedState,
+                        selected = isSelected,
+                        forgetting = forgetting,
+                        message = diagnosticMessage,
+                        onForget = { confirmForget(phone) }
+                    )
+                } else if (choices != null) {
+                    PhoneConnectionListScreen(
+                        devices = choices,
+                        selectedAddress = selectedPhoneAddress,
+                        onSelect = { device ->
+                            if (forgetInProgress) {
+                                showMessage("Wait for the current forget request to finish")
+                            } else {
+                                getSharedPreferences(ANCSAndroidService.PREFERENCES, MODE_PRIVATE).edit()
+                                    .putString(ANCSAndroidService.TARGET_ADDRESS, device.address).apply()
+                                selectedPhoneAddress = device.address
+                                phoneChoices = null
+                                startAndBind()
+                            }
+                        },
+                        onInfo = { device -> showConnectionInfo(device) }
+                    )
+                } else WearApp(
+                    amsState = service?.mediaState ?: disconnectedState,
+                    onTogglePlayPause = { sendAMSCommand(AMSCommand.TOGGLE_PLAY_PAUSE) },
+                    onNextTrack = { sendAMSCommand(AMSCommand.NEXT_TRACK) },
+                    onPreviousTrack = { sendAMSCommand(AMSCommand.PREVIOUS_TRACK) },
+                    status = connectionStatus,
+                    connectionState = phoneConnectionState,
+                    onChoosePhone = {
+                        if (hasPermissions()) choosePhone() else permissionRequest.launch(permissions)
+                    }
+                )
             }
-            if (phone != null) {
-                val isSelected = phone.address == selectedPhoneAddress
-                PhoneDiagnosticsScreen(
-                    device = phone,
-                    connectionState = if (isSelected) phoneConnectionState else PhoneConnectionState.DISCONNECTED,
-                    status = if (isSelected) connectionStatus else getString(R.string.phone_not_selected),
-                    mediaState = if (isSelected) service?.mediaState ?: disconnectedState else disconnectedState,
-                    selected = isSelected,
-                    forgetting = forgetInProgress,
-                    message = diagnosticMessage,
-                    onForget = { confirmForget(phone) }
-                )
-            } else if (choices != null) {
-                PhoneConnectionListScreen(
-                    devices = choices,
-                    selectedAddress = selectedPhoneAddress,
-                    onSelect = { device ->
-                        getSharedPreferences(ANCSAndroidService.PREFERENCES, MODE_PRIVATE).edit()
-                            .putString(ANCSAndroidService.TARGET_ADDRESS, device.address).apply()
-                        selectedPhoneAddress = device.address
-                        phoneChoices = null
-                        startAndBind()
-                    },
-                    onInfo = { device -> showConnectionInfo(device) }
-                )
-            } else WearApp(
-                amsState = service?.mediaState ?: disconnectedState,
-                onTogglePlayPause = { sendAMSCommand(AMSCommand.TOGGLE_PLAY_PAUSE) },
-                onNextTrack = { sendAMSCommand(AMSCommand.NEXT_TRACK) },
-                onPreviousTrack = { sendAMSCommand(AMSCommand.PREVIOUS_TRACK) },
-                status = connectionStatus,
-                connectionState = phoneConnectionState,
-                onChoosePhone = {
-                    if (hasPermissions()) choosePhone() else permissionRequest.launch(permissions)
-                }
-            )
         }
         if (!hasPermissions()) permissionRequest.launch(permissions)
     }
@@ -317,12 +329,14 @@ class MainActivity : ComponentActivity() {
 
     @android.annotation.SuppressLint("MissingPermission")
     private fun startAndBind() {
-        if (!hasPermissions() || forgetInProgress) return
+        if (!hasPermissions()) return
         val address = getSharedPreferences(ANCSAndroidService.PREFERENCES, MODE_PRIVATE)
             .getString(ANCSAndroidService.TARGET_ADDRESS, null)
         selectedPhoneAddress = address
-        val devices = getSystemService(BluetoothManager::class.java).adapter?.bondedDevices.orEmpty()
-        if (devices.none { it.address == address }) {
+        val adapter = getSystemService(BluetoothManager::class.java).adapter
+        if (address == null || adapter == null ||
+            (adapter.isEnabled && adapter.bondedDevices.none { it.address == address })
+        ) {
             choosePhone()
             return
         }
@@ -338,6 +352,10 @@ class MainActivity : ComponentActivity() {
     @android.annotation.SuppressLint("MissingPermission")
     private fun choosePhone() {
         if (!hasPermissions() || chooser != null || phoneChoices != null) return
+        if (forgetInProgress) {
+            showMessage("Wait for the current forget request to finish")
+            return
+        }
         val adapter = getSystemService(BluetoothManager::class.java).adapter
         if (adapter == null || !adapter.isEnabled) {
             showMessage("Enable Bluetooth in watch settings")
@@ -370,7 +388,6 @@ class MainActivity : ComponentActivity() {
             .setMessage(getString(R.string.forget_phone_confirmation, phone.address))
             .setPositiveButton(R.string.forget_phone) { _, _ ->
                 lifecycleScope.launch {
-                    forgetInProgress = true
                     diagnosticMessage = ""
                     try {
                         if (!hasPermissions()) throw SecurityException("Bluetooth permission is required")
@@ -387,8 +404,6 @@ class MainActivity : ComponentActivity() {
                     } catch (error: SecurityException) {
                         diagnosticMessage = getString(R.string.forget_permission_denied)
                         showMessage(diagnosticMessage)
-                    } finally {
-                        forgetInProgress = false
                     }
                 }
             }
@@ -405,6 +420,29 @@ class MainActivity : ComponentActivity() {
             service == null -> showMessage("No active iPhone connection")
             else -> service.sendAMSCommand(command)
         }
+    }
+}
+
+@Composable
+internal fun PhoneScreenBackNavigation(
+    hasPreviousScreen: Boolean,
+    navigationBlocked: Boolean,
+    onBack: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    BackHandler(enabled = hasPreviousScreen) {
+        if (!navigationBlocked) onBack()
+    }
+    if (hasPreviousScreen && Build.VERSION.SDK_INT < 36) {
+        BasicSwipeToDismissBox(
+            onDismissed = { if (!navigationBlocked) onBack() },
+            modifier = Modifier.systemGestureExclusion(),
+            userSwipeEnabled = !navigationBlocked
+        ) { isBackground ->
+            if (!isBackground) content()
+        }
+    } else {
+        content()
     }
 }
 
