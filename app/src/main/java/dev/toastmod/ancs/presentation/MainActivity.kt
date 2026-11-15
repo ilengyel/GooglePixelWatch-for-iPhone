@@ -26,7 +26,7 @@ import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -244,10 +244,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             val service = gattService
-            val connectionStatus by (service?.status ?: localStatus).collectAsState()
+            val connectionStatus by (service?.status ?: localStatus).collectAsStateWithLifecycle()
             val phoneConnectionState by
-                (service?.connectionState ?: disconnectedConnectionState).collectAsState()
-            val forgetting by (service?.forgettingPhone ?: notForgetting).collectAsState()
+                (service?.connectionState ?: disconnectedConnectionState).collectAsStateWithLifecycle()
+            val forgetting by (service?.forgettingPhone ?: notForgetting).collectAsStateWithLifecycle()
             val phone = diagnosticPhone
             val choices = phoneChoices
             PhoneScreenBackNavigation(
@@ -456,7 +456,7 @@ fun WearApp(
     connectionState: PhoneConnectionState = PhoneConnectionState.DISCONNECTED,
     onChoosePhone: (() -> Unit)? = null
 ) {
-    val state by amsState.collectAsState()
+    val state by amsState.collectAsStateWithLifecycle()
     ANCSTheme {
         AppScaffold {
             ScreenScaffold { contentPadding ->

@@ -7,6 +7,8 @@ import androidx.core.app.NotificationCompat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertNotSame
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -57,6 +59,46 @@ class ANCSNotificationLifecycleTest {
         val notification = manager.activeNotifications.single()
         assertEquals(1, notification.id)
         assertEquals("Updated", notification.notification.extras.getString(Notification.EXTRA_TITLE))
+    }
+
+    @Test
+    fun unchangedRenderedContentIsNotRepostedButContentAndFlagChangesAre() {
+        val client = client()
+        client.onNotificationSource(EventID.NotificationAdded.b, 0, 0, uid(1))
+        client.onAttributes(uid(1), attributes("Title"))
+        val original = manager.activeNotifications.single().notification
+
+        client.onNotificationSource(EventID.NotificationModified.b, 0, 0, uid(1))
+        client.onAttributes(uid(1), ANCSAttributes("com.example.app", "Title", "  ", "Message"))
+        assertSame(original, manager.activeNotifications.single().notification)
+
+        client.onNotificationSource(EventID.NotificationModified.b, 1, 0, uid(1))
+        client.onAttributes(uid(1), attributes("Title"))
+        val silentUpdate = manager.activeNotifications.single().notification
+        assertNotSame(original, silentUpdate)
+        assertEquals(NotificationCompat.GROUP_ALERT_SUMMARY, silentUpdate.groupAlertBehavior)
+        client.onAttributes(uid(1), attributes("Title"))
+        assertSame(silentUpdate, manager.activeNotifications.single().notification)
+
+        client.onAttributes(uid(1), attributes("Changed title"))
+        val changed = manager.activeNotifications.single().notification
+        assertNotSame(silentUpdate, changed)
+        assertEquals("Changed title", changed.extras.getString(Notification.EXTRA_TITLE))
+        client.onAttributes(uid(1), ANCSAttributes("other.app", "Changed title", "", "Changed message"))
+        assertEquals("other.app", manager.activeNotifications.single().notification.group)
+        assertEquals("Changed message",
+            manager.activeNotifications.single().notification.extras.getString(Notification.EXTRA_TEXT))
+    }
+
+    @Test
+    fun cancellingClearsTheDeduplicationState() {
+        manager.createNotificationChannel(channel)
+        val notification = ANCSNotification(channel, 1, CategoryID.Other)
+        notification.spawnAndroidNotif(context, attributes("Title"))
+        notification.despawnAndroidNotif(context)
+        assertTrue(manager.activeNotifications.isEmpty())
+        notification.spawnAndroidNotif(context, attributes("Title"))
+        assertEquals("Title", manager.activeNotifications.single().notification.extras.getString(Notification.EXTRA_TITLE))
     }
 
     @Test

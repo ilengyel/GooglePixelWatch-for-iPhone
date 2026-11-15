@@ -1,8 +1,13 @@
 package dev.toastmod.ancs.presentation
 
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -11,8 +16,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.LifecycleStartEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,7 +41,6 @@ import androidx.wear.compose.material3.lazy.rememberTransformationSpec
 import androidx.wear.compose.material3.lazy.transformedHeight
 import dev.toastmod.ancs.R
 import dev.toastmod.ancs.presentation.theme.ANCSTheme
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 
 @android.annotation.SuppressLint("MissingPermission")
@@ -52,13 +56,13 @@ fun PhoneDiagnosticsScreen(
     onForget: () -> Unit
 ) {
     val context = LocalContext.current
-    val media by mediaState.collectAsState()
+    val media by mediaState.collectAsStateWithLifecycle()
     var bondState by remember(device) { mutableStateOf(BluetoothDevice.BOND_NONE) }
     var bluetoothEnabled by remember { mutableStateOf(false) }
     var deviceName by remember(device) { mutableStateOf("") }
     var permissionGranted by remember { mutableStateOf(true) }
-    LaunchedEffect(device) {
-        while (true) {
+    LifecycleStartEffect(device, context) {
+        fun refresh() {
             permissionGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
                 PackageManager.PERMISSION_GRANTED
             if (permissionGranted) {
@@ -72,7 +76,27 @@ fun PhoneDiagnosticsScreen(
                     permissionGranted = false
                 }
             }
-            delay(1_000)
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED ||
+                    intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) == device
+                ) {
+                    refresh()
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+            addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            addAction(BluetoothDevice.ACTION_NAME_CHANGED)
+            addAction(BluetoothDevice.ACTION_ALIAS_CHANGED)
+        }
+        // Bluetooth broadcasts can originate from a privileged process outside the system UID.
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        refresh()
+        onStopOrDispose {
+            context.unregisterReceiver(receiver)
         }
     }
     ANCSTheme {

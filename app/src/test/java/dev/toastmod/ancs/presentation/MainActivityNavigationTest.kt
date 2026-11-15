@@ -1,7 +1,11 @@
 package dev.toastmod.ancs.presentation
 
+import android.Manifest
+import android.bluetooth.BluetoothDevice
+import android.content.Intent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -10,13 +14,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeRight
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.mockito.Mockito.clearInvocations
+import org.mockito.Mockito.never
+import org.mockito.Mockito.verify
+import org.mockito.Mockito.`when`
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
@@ -26,6 +42,85 @@ import org.robolectric.annotation.GraphicsMode
 class MainActivityNavigationTest {
     @get:Rule
     val compose = createComposeRule()
+
+    private class ScreenLifecycle : LifecycleOwner {
+        override val lifecycle = LifecycleRegistry.createUnsafe(this).apply {
+            currentState = Lifecycle.State.RESUMED
+        }
+    }
+
+    @Test
+    fun mediaCollectionStopsWithTheScreenAndResumesWithTheLatestState() {
+        val owner = ScreenLifecycle()
+        val media = MutableStateFlow(AMSState())
+        compose.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                WearApp(media, {}, {}, {})
+            }
+        }
+        compose.runOnIdle {
+            assertEquals(1, media.subscriptionCount.value)
+            owner.lifecycle.currentState = Lifecycle.State.CREATED
+        }
+        compose.runOnIdle {
+            assertEquals(0, media.subscriptionCount.value)
+            media.value = AMSState(available = true, track = AMSTrackInfo(title = "Latest track"))
+            owner.lifecycle.currentState = Lifecycle.State.RESUMED
+        }
+        compose.onNodeWithText("Latest track").assertExists()
+        compose.runOnIdle { assertEquals(1, media.subscriptionCount.value) }
+    }
+
+    @Test
+    fun diagnosticsRefreshOnDeviceBroadcastsOnlyWhileStarted() {
+        val context = RuntimeEnvironment.getApplication()
+        shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
+        val phone = TestBluetoothDevice().device
+        `when`(phone.alias).thenReturn("Original phone")
+        `when`(phone.bondState).thenReturn(BluetoothDevice.BOND_BONDED)
+        val owner = ScreenLifecycle()
+        val media = MutableStateFlow(AMSState())
+        compose.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                PhoneDiagnosticsScreen(phone, PhoneConnectionState.DISCONNECTED, "", media,
+                    selected = true, forgetting = false, message = "", onForget = {})
+            }
+        }
+        compose.onNodeWithText("Original phone").assertExists()
+        compose.runOnIdle {
+            assertEquals(1, media.subscriptionCount.value)
+            clearInvocations(phone)
+            context.sendBroadcast(Intent(BluetoothDevice.ACTION_NAME_CHANGED)
+                .putExtra(BluetoothDevice.EXTRA_DEVICE, TestBluetoothDevice("00:11:22:33:44:66").device))
+        }
+        compose.runOnIdle {
+            verify(phone, never()).alias
+            `when`(phone.alias).thenReturn("Renamed phone")
+            context.sendBroadcast(Intent(BluetoothDevice.ACTION_ALIAS_CHANGED)
+                .putExtra(BluetoothDevice.EXTRA_DEVICE, phone))
+        }
+        compose.onNodeWithText("Renamed phone").assertExists()
+        compose.runOnIdle {
+            verify(phone).bondState
+            owner.lifecycle.currentState = Lifecycle.State.CREATED
+        }
+        compose.runOnIdle {
+            assertEquals(0, media.subscriptionCount.value)
+            clearInvocations(phone)
+            context.sendBroadcast(Intent(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+                .putExtra(BluetoothDevice.EXTRA_DEVICE, phone))
+        }
+        compose.runOnIdle {
+            verify(phone, never()).bondState
+            `when`(phone.alias).thenReturn("Changed while stopped")
+            owner.lifecycle.currentState = Lifecycle.State.RESUMED
+        }
+        compose.onNodeWithText("Changed while stopped").assertExists()
+        compose.runOnIdle {
+            verify(phone).bondState
+            assertEquals(1, media.subscriptionCount.value)
+        }
+    }
 
     @Test
     fun swipingBackPopsEachPhoneScreenButLeavesRootDismissalToThePlatform() {

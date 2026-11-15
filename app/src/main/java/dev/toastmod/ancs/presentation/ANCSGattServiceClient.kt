@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
 
@@ -43,6 +44,7 @@ class ANCSGattServiceClient(
     private var connectionJob: Job? = null
     private var retryDelay = 1_000L
     private var queue: Channel<Operation>? = null
+    private var commandQueue: Channel<Operation.Command>? = null
     private val requestedNotifications = linkedMapOf<Int, ByteArray>()
     private var notificationQueued = false
     private val attributeVersions = mutableMapOf<Pair<Byte, Byte>, Int>()
@@ -131,6 +133,8 @@ class ANCSGattServiceClient(
         sessionJob = null
         queue?.close()
         queue = null
+        commandQueue?.close()
+        commandQueue = null
         pendingCallback?.result?.cancel()
         pendingCallback = null
         pendingNotification?.result?.cancel()
@@ -191,7 +195,9 @@ class ANCSGattServiceClient(
     private fun startSession(gatt: BluetoothGatt) {
         if (sessionJob?.isActive == true) return
         val operations = Channel<Operation>(64)
+        val commands = Channel<Operation.Command>(64)
         queue = operations
+        commandQueue = commands
         sessionJob = scope.launch {
             try {
                 awaitCallback(CallbackKind.SERVICES) { gatt.discoverServices() }
@@ -199,7 +205,11 @@ class ANCSGattServiceClient(
                 retryDelay = 1_000
                 onConnectionState(PhoneConnectionState.CONNECTED)
                 onStatus(connectedStatus)
-                for (operation in operations) {
+                while (true) {
+                    val operation = commands.tryReceive().getOrNull() ?: select<Operation> {
+                        commands.onReceive { it }
+                        operations.onReceive { it }
+                    }
                     when (operation) {
                         Operation.Notification -> {
                             notificationQueued = false
@@ -379,7 +389,12 @@ class ANCSGattServiceClient(
     ) = complete(gatt, CallbackKind.READ, characteristic.uuid, status, value.copyOf())
 
     private fun enqueue(operation: Operation) {
-        if (queue?.trySend(operation)?.isSuccess != true) {
+        val sent = if (operation is Operation.Command) {
+            commandQueue?.trySend(operation)?.isSuccess
+        } else {
+            queue?.trySend(operation)?.isSuccess
+        }
+        if (sent != true) {
             reconnect("Bluetooth request queue is unavailable or full")
         }
     }

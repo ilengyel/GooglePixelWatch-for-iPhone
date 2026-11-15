@@ -72,4 +72,26 @@ class ANCSResponseTest {
             ANCSResponse(uid).append(ByteArray(4097))
         }
     }
+
+    @Test
+    fun assemblesMaximumLengthAttributesOutOfOrderOneByteAtATime() {
+        val expected = ANCSAttributes("a".repeat(1024), "t".repeat(511), "s".repeat(511), "m".repeat(511))
+        val bytes = byteArrayOf(0) + uid + attribute(3, expected.message) +
+            attribute(1, expected.title) + attribute(0, expected.appIdentifier) + attribute(2, expected.subtitle)
+        val parser = ANCSResponse(uid)
+        for (index in 0 until bytes.lastIndex) {
+            assertNull(parser.append(byteArrayOf(bytes[index])))
+        }
+        assertEquals(expected, parser.append(byteArrayOf(bytes.last())))
+    }
+
+    @Test
+    fun rejectsDuplicateAttributeAcrossFragments() {
+        val parser = ANCSResponse(uid)
+        assertNull(parser.append(byteArrayOf(0) + uid + attribute(0, "App")))
+        assertNull(parser.append(byteArrayOf(0)))
+        assertThrows(IllegalArgumentException::class.java) {
+            parser.append(byteArrayOf(0, 0))
+        }
+    }
 }

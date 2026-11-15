@@ -44,6 +44,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.lifecycle.runtime.compose)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.mockito.core)

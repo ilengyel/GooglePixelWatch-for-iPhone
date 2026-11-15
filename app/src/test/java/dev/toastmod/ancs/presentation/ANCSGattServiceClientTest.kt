@@ -249,6 +249,40 @@ class ANCSGattServiceClientTest {
     }
 
     @Test
+    fun mediaCommandsRunInOrderBeforeTheNextNotificationWithoutInterruptingTheActiveRequest() {
+        val connection = connected()
+        connection.notify(connection.remote, byteArrayOf(2, 3))
+        connection.notify(connection.source, byteArrayOf(0, 0, 0, 0, 1, 0, 0, 0))
+        scheduler.runCurrent()
+        assertEquals(ANCS_CONTROL_POINT, connection.pending.single().uuid)
+        connection.finishNext()
+        scheduler.runCurrent()
+        assertTrue(connection.pending.isEmpty())
+
+        connection.notify(connection.source, byteArrayOf(0, 0, 0, 0, 2, 0, 0, 0))
+        scheduler.runCurrent()
+        client.sendAMSCommand(2)
+        client.sendAMSCommand(3)
+        scheduler.runCurrent()
+        assertTrue("Commands must wait for the active notification response", connection.pending.isEmpty())
+
+        // Four empty attributes complete the active ANCS response.
+        connection.notify(connection.dataSource,
+            byteArrayOf(0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0))
+        scheduler.runCurrent()
+        assertEquals(AMS_REMOTE_COMMAND, connection.pending.single().uuid)
+        assertTrue(connection.pending.single().value.contentEquals(byteArrayOf(2)))
+        connection.finishNext()
+        scheduler.runCurrent()
+        assertEquals(AMS_REMOTE_COMMAND, connection.pending.single().uuid)
+        assertTrue(connection.pending.single().value.contentEquals(byteArrayOf(3)))
+        connection.finishNext()
+        scheduler.runCurrent()
+        assertEquals(ANCS_CONTROL_POINT, connection.pending.single().uuid)
+        assertTrue(connection.pending.single().value.copyOfRange(1, 5).contentEquals(byteArrayOf(2, 0, 0, 0)))
+    }
+
+    @Test
     fun operationTimeoutClosesTheSessionAndClearsState() {
         val connection = connected()
         connection.notify(connection.remote, byteArrayOf(2))
