@@ -73,6 +73,10 @@ row has an info icon that opens its diagnostics without changing the selection.
 Diagnostics show the full Bluetooth address.
 ANCS connection/media status and Forget are available for the selected phone only.
 
+Android manages the Service Changed subscription. The app must not write that
+subscription itself: on Pixel Watch this can stall setup before ANCS and AMS
+subscriptions, even though the Bluetooth link is connected.
+
 **Forget phone** requires confirmation and attempts to remove only that Bluetooth
 bond. Android may block the system unpair API; failures are shown without resetting
 Bluetooth or the watch. The saved selection is cleared only after bond removal is

@@ -257,10 +257,7 @@ class ANCSGattServiceClient(
     }
 
     private suspend fun setup(gatt: BluetoothGatt): String {
-        val serviceChanged = gatt.getService(GENERIC_ATTRIBUTE)
-            ?.getCharacteristic(SERVICE_CHANGED)
-        if (serviceChanged?.getDescriptor(CCCD) != null) subscribe(gatt, serviceChanged)
-
+        // Android manages Service Changed indications and delivers onServiceChanged.
         val ancs = gatt.getService(ANCS_SERVICE)
         val ams = gatt.getService(AMS_SERVICE)
         if (ancs == null && ams == null) {
@@ -510,7 +507,6 @@ class ANCSGattServiceClient(
 
     companion object {
         private val CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        private val GENERIC_ATTRIBUTE = UUID.fromString("00001801-0000-1000-8000-00805f9b34fb")
         private val SERVICE_CHANGED = UUID.fromString("00002a05-0000-1000-8000-00805f9b34fb")
     }
 }

@@ -4,7 +4,9 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import kotlinx.coroutines.Dispatchers
@@ -20,9 +22,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.Mockito.`when`
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -103,6 +107,34 @@ class ANCSGattServiceClientTest {
     private fun refreshCount(connection: TestBluetoothDevice.Connection) =
         connection.operations.count { it.kind == "descriptor" && it.uuid == AMS_ENTITY_UPDATE &&
             it.value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE) }
+
+    @Test
+    fun setupDoesNotWaitForPlatformManagedServiceChangedSubscription() {
+        val connection = startConnection()
+        val genericAttribute = UUID.fromString("00001801-0000-1000-8000-00805f9b34fb")
+        val serviceChanged = UUID.fromString("00002a05-0000-1000-8000-00805f9b34fb")
+        val service = BluetoothGattService(genericAttribute, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+        service.addCharacteristic(BluetoothGattCharacteristic(serviceChanged,
+            BluetoothGattCharacteristic.PROPERTY_INDICATE, 0).apply {
+            addDescriptor(BluetoothGattDescriptor(
+                UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"),
+                BluetoothGattDescriptor.PERMISSION_WRITE))
+        })
+        `when`(connection.gatt.getService(genericAttribute)).thenReturn(service)
+
+        connection.finishNext()
+        scheduler.runCurrent()
+        while (connection.pending.isNotEmpty() && connection.pending.first().uuid != serviceChanged) {
+            connection.finishNext()
+            scheduler.runCurrent()
+        }
+
+        assertEquals("Connected", statuses.last())
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
+        assertTrue(media.state.value.available)
+        assertFalse(connection.closed)
+        assertTrue(connection.pending.isEmpty())
+    }
 
     @Test
     fun connectionIndicatorWaitsForSetupAndTracksDisconnectRetryAndClose() {

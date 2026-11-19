@@ -44,6 +44,11 @@ Huge thanks to [loud-at-heart](https://github.com/loud-at-heart) for the [AMS](h
 If notifications or media controls are unavailable, check the iPhone's Bluetooth
 sharing settings.
 
+## Architecture
+
+See [Architecture](ARCHITECTURE.md) for a high-level overview of responsibilities,
+data flow, connection lifecycle and power-use considerations.
+
 ## References
 
 - [Apple Notification Center Service (ANCS) specification](https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleNotificationCenterServiceSpecification/Specification/Specification.html)
