@@ -1,5 +1,25 @@
 <resources>
     <string name="app_name">ANCS</string>
+    <string name="notification_apps">Notification apps</string>
+    <string name="apps_empty">Apps appear here when notifications arrive.</string>
+    <string name="apps_disconnected">Connect to your iPhone to manage notification apps.</string>
+    <string name="volume_down">Volume down</string>
+    <string name="volume_up">Volume up</string>
+    <string name="volume_percent">%1$d%%</string>
+    <string name="volume_unknown">Volume unknown</string>
+    <string name="crown_volume_off">Use crown for volume</string>
+    <string name="crown_volume_on">Crown volume on</string>
+    <string name="notification_action_unavailable">Notification action is no longer available. Open the app to check the connection.</string>
+    <string name="more_controls">More controls</string>
+    <string name="fewer_controls">Fewer controls</string>
+    <string name="skip_backward">Skip backward</string>
+    <string name="skip_forward">Skip forward</string>
+    <string name="shuffle_mode">Shuffle: %1$s</string>
+    <string name="repeat_mode">Repeat: %1$s</string>
+    <string name="mode_off">Off</string>
+    <string name="mode_one">One</string>
+    <string name="mode_all">All</string>
+    <string name="mode_unknown">Unknown</string>
     <string name="choose_iphone">Choose iPhone</string>
     <string name="iphone_connected">iPhone connected</string>
     <string name="iphone_connecting">Connecting to iPhone</string>

@@ -38,13 +38,17 @@ deployments.
 ## Data flow
 
 **Notifications:** the iPhone reports an added, changed or removed notification.
-The watch fetches the required text, assembles the response, and posts, updates
-or removes the corresponding native notification. Redundant updates are
-suppressed. Watch dismissals and replies are not sent back to the phone.
+The watch applies per-phone app filters before fetching content and mirrors
+enabled notifications with cached app names. Blocking removes existing mirrors;
+enabling does not replay old alerts.
+
+iPhone-advertised action buttons send validated commands through the service.
+Swiping dismisses only the watch copy; text replies are not supported.
 
 **Media:** the iPhone pushes track and playback updates to the watch UI.
 User playback actions are queued and sent to the phone; the UI follows the
-phone's reported state rather than assuming a command succeeded.
+phone's reported state rather than assuming a command succeeded. Playback,
+volume and shuffle/repeat controls follow the iPhone's advertised capabilities.
 
 ## Lifecycle and recovery
 

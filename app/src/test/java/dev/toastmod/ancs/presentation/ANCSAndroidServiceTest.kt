@@ -2,6 +2,9 @@ package dev.toastmod.ancs.presentation
 
 import android.Manifest
 import android.app.Service
+import android.app.NotificationManager
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothAdapter
@@ -31,6 +34,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowToast
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -88,9 +92,82 @@ class ANCSAndroidServiceTest {
         context.getSharedPreferences(ANCSAndroidService.PREFERENCES, Context.MODE_PRIVATE)
 
     @Test
+    fun notificationPendingIntentRoutesToTheExistingServiceAndWritesAnActionWithoutDataResponse() {
+        service.onStartCommand(intent(), 0, 1)
+        val connection = phone.connections.single()
+        connection.callback.onConnectionStateChange(connection.gatt, BluetoothGatt.GATT_SUCCESS,
+            BluetoothProfile.STATE_CONNECTED)
+        scheduler.runCurrent()
+        while (connection.pending.isNotEmpty()) {
+            connection.finishNext()
+            scheduler.runCurrent()
+        }
+        fun respond(vararg attributes: Pair<Int, String>) {
+            val command = connection.pending.single().value
+            val header = if (command[0] == 0.toByte()) command.copyOfRange(0, 5)
+                else command.copyOfRange(0, command.lastIndex)
+            val tuples = attributes.fold(byteArrayOf()) { bytes, (id, value) ->
+                val encoded = value.encodeToByteArray()
+                bytes + byteArrayOf(id.toByte(), encoded.size.toByte(), (encoded.size shr 8).toByte()) + encoded
+            }
+            connection.finishNext()
+            scheduler.runCurrent()
+            connection.notify(connection.dataSource, header + tuples)
+            scheduler.runCurrent()
+        }
+        connection.notify(connection.source, byteArrayOf(0, 8, 0, 0, 1, 0, 0, 0))
+        scheduler.runCurrent()
+        respond(0 to "app")
+        respond(1 to "Title", 2 to "", 3 to "", 6 to "Open")
+        respond(0 to "App")
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val pending = manager.activeNotifications.single { it.tag == ANCSNotification.TAG }
+            .notification.actions.single().actionIntent
+        assertTrue(pending.isImmutable)
+        assertEquals(Service.START_STICKY,
+            service.onStartCommand(shadowOf(pending).savedIntent, 0, 2))
+        scheduler.runCurrent()
+        assertEquals(listOf<Byte>(2, 1, 0, 0, 0, 0), connection.pending.single().value.toList())
+        connection.finishNext()
+        scheduler.runCurrent()
+        assertTrue(connection.pending.isEmpty())
+        assertTrue(manager.activeNotifications.single { it.tag == ANCSNotification.TAG }
+            .notification.actions.orEmpty().isEmpty())
+        assertEquals(1, phone.connections.size)
+        assertFalse(connection.closed)
+    }
+
+    @Test
+    fun staleNotificationActionsDoNotStartAConnectionOrUseSavedPhone() {
+        preferences().edit().putString(ANCSAndroidService.TARGET_ADDRESS, phone.device.address).commit()
+        val stale = ANCSNotificationAction(1, 0, "expired-session", 1, "Open")
+        assertEquals(Service.START_NOT_STICKY,
+            service.onStartCommand(stale.toIntent(context), 0, 1))
+        scheduler.runCurrent()
+        assertTrue(phone.connections.isEmpty())
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        assertTrue(ShadowToast.getTextOfLatestToast().toString().contains("no longer available"))
+    }
+
+    @Test
+    fun malformedNotificationActionDoesNotInterruptTheActiveConnection() {
+        service.onStartCommand(intent(), 0, 1)
+        val connection = phone.connections.single()
+        assertEquals(Service.START_STICKY, service.onStartCommand(
+            Intent().setAction(ANCSNotificationAction.INTENT_ACTION), 0, 2))
+        assertFalse(connection.closed)
+        assertEquals(1, phone.connections.size)
+        assertFalse(shadowOf(service).isStoppedBySelf)
+        assertTrue(service.status.value.contains("no longer available"))
+    }
+
+    @Test
     fun forgettingWaitsForBondRemovalAndStopsReconnectsWithoutRemovingOtherSelections() =
         serviceTest {
             service.onStartCommand(intent(), 0, 1)
+            preferences().edit()
+                .putStringSet(NotificationApps.blockedKey(phone.device.address), setOf("blocked"))
+                .putStringSet(NotificationApps.blockedKey("other-phone"), setOf("other-app")).commit()
             val connection = phone.connections.single()
             `when`(phone.device.bondState).thenReturn(BluetoothDevice.BOND_BONDED)
             var requestedAddress: String? = null
@@ -114,6 +191,9 @@ class ANCSAndroidServiceTest {
             scheduler.runCurrent()
             forgetJob.join()
             assertFalse(preferences().contains(ANCSAndroidService.TARGET_ADDRESS))
+            assertFalse(preferences().contains(NotificationApps.blockedKey(phone.device.address)))
+            assertEquals(setOf("other-app"),
+                preferences().getStringSet(NotificationApps.blockedKey("other-phone"), emptySet()))
             assertTrue(shadowOf(service).isStoppedBySelf)
             assertEquals(1, phone.connections.size)
         }
@@ -122,6 +202,8 @@ class ANCSAndroidServiceTest {
     fun rejectedOrUnconfirmedUnpairRestoresTheSelectedConnection() =
         serviceTest {
             service.onStartCommand(intent(), 0, 1)
+            preferences().edit()
+                .putStringSet(NotificationApps.blockedKey(phone.device.address), setOf("blocked")).commit()
             `when`(phone.device.bondState).thenReturn(BluetoothDevice.BOND_BONDED)
             for (accepted in listOf(false, true)) {
                 val oldConnection = phone.connections.last()
@@ -132,6 +214,8 @@ class ANCSAndroidServiceTest {
                     failure = error
                 }
                 assertTrue(failure != null)
+                assertEquals(setOf("blocked"), preferences().getStringSet(
+                    NotificationApps.blockedKey(phone.device.address), emptySet()))
                 assertEquals(phone.device.address,
                     preferences().getString(ANCSAndroidService.TARGET_ADDRESS, null))
                 assertTrue(oldConnection.closed)

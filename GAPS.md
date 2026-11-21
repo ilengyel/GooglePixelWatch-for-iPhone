@@ -12,8 +12,12 @@ The [README](README.md) records Pixel Watch 4 testing; battery costs below are
 qualitative, not measured.
 
 **Implemented:** ANCS notification title/subtitle/message and updates/removals
-for retained notifications; AMS title/artist/playback state and supported
-play/pause/previous/next commands; background service, remembered phone and
+for retained notifications, labelled advertised actions, session-cached app names
+and per-phone filtering;
+AMS title/artist/playback/volume and shuffle/repeat state with supported
+play/pause/previous/next, volume, skip and mode-cycling commands, plus opt-in
+bounded crown volume;
+background service, remembered phone and
 automatic reconnection; phone selection, status, diagnostics and forget/unpair.
 Connection management is app-level, not full native Settings integration.
 
@@ -30,10 +34,10 @@ the capabilities below are missing.
 
 | Capability | Current limitation | Feasibility / boundary |
 | --- | --- | --- |
-| Notification buttons and watch-to-phone dismissal | No actions. | ANCS positive/negative actions are feasible; use supplied labels. A negative action is not always dismissal, and these are not arbitrary Android actions. Answer/decline may be available for calls, but **answering does not establish call audio**. |
-| App names and per-app filtering | App identifier used for grouping; generic icon/text; no bridge filtering. | Cache ANCS app display names and filter by identifier. iPhone sharing settings also affect delivery; richer visuals need another path. |
+| Notification buttons and watch-to-phone dismissal | Labelled advertised ANCS actions implemented; watch swipes remain local. | A negative action is not always dismissal, and these are not arbitrary Android actions. Stale/filtered/removed actions are rejected. Answer/decline may be available for calls, but **answering does not establish call audio**. |
+| App names and per-app filtering | Implemented: session-cached display names and persistent per-phone filters; generic icon remains. | Unknown notifications need an identifier lookup before filtering. Blocked apps skip text/name reads; enabling does not replay alerts. iPhone sharing settings still affect delivery; richer visuals need another path. |
 | Notification continuity/history | Retains up to 20; clears mirrored notifications on disconnect. | Larger retention is straightforward, but **ANCS is not durable history or synchronization**. |
-| Expanded media controls and metadata | No volume UI; model parses album/duration/playback timing, but subscriptions/UI are limited. | AMS provides volume state/up/down, album, duration, progress, shuffle/repeat and skip forward/back, subject to media-app support. |
+| Expanded media controls and metadata | Volume buttons/percentage, opt-in bounded crown volume and expandable skip/shuffle/repeat controls implemented. Album/duration/playback timing remain limited in subscriptions/UI. | Controls follow advertised support and phone-reported state; skip interval is player-defined. No slider or progress ticker. |
 | Native Wear media controls, tile and complication | Controls are in-app; tile/complication are starter surfaces. | Expose a proper media session and event-updated surfaces. |
 | Reboot recovery and long-idle reliability | Reconnection exists; no boot receiver. | Add reboot recovery and validate long-idle delivery. A foreground service does not guarantee uninterrupted delivery. |
 | Phone-left-behind alert | No disconnect alert. | Debounce connection events; disconnect is not reliable proof of distance or theft. |
@@ -94,10 +98,13 @@ UI collection is lifecycle-aware; diagnostics observation stops with the screen.
 - Reconnect attempts continue indefinitely while the phone is unavailable:
   faster recovery trades off against out-of-range drain.
 - Notification storms drive BLE work, vibration and display wakeups. Filter
-  early to avoid attribute requests and alerts; avoid unnecessary text fetches
-  and replayed alerts.
+  early to avoid text requests and alerts; unknown UIDs still need an app
+  identifier lookup. Allowed cold notifications gain a separate text transaction
+  and uncached names need a lookup. Filtering is not a measured battery saving.
 - Keep media progress local and **visible-screen only**, surfaces event-driven,
-  and crown-volume writes bounded. Scrolling titles/animations still cost power.
+  and crown-volume writes bounded (implemented: one per 200 ms, one queued
+  direction, 500 ms expiry, cancelled on leaving the active focus mode).
+  Scrolling titles/animations still cost power.
 - Cache names and batch data/health summaries rather than polling or streaming.
   Simple BLE buttons, text and on-demand ringing are relatively cheap;
   dictation/AI suggestions add microphone, compute or network costs.
@@ -111,7 +118,9 @@ A foreground service does not imply zero idle drain. See
 ## 4. Recommended implementation order
 
 1. **Best value, lowest power:** labelled ANCS actions, app-name caching/filtering,
-   media volume and additional AMS controls.
+   media volume and additional AMS controls. App names/filtering and media
+   controls, including labelled actions and crown volume, are now implemented in
+   source with automated coverage. Hardware and battery validation remain outstanding.
 2. **Daily usability:** real media session, useful tile/complication, debounced
    disconnect alerts and reboot recovery.
 3. **Measure before expanding:** compare stopped, connected-idle,

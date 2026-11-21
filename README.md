@@ -16,10 +16,47 @@ Huge thanks to [loud-at-heart](https://github.com/loud-at-heart) for the [AMS](h
 
 - **Notifications (ANCS):** subscribes to the iPhone's Notification Center
   and mirrors incoming notifications (app, title, subtitle, message) as
-  native Android notifications on the watch.
+  native Android notifications on the watch, with cached app display names and
+  per-iPhone app filtering. Notifications expose the iPhone's supplied action
+  labels when positive/negative actions are available.
 - **Now Playing (AMS):** subscribes to the iPhone's current media session
   and shows a live-updating control card — track title/artist, play/pause,
   and skip previous/next — that sends remote-control commands back to the phone.
+  Volume buttons show the phone-reported percentage. **More controls** exposes
+  skip backward/forward and shuffle/repeat cycling when supported by the player.
+
+### Notification apps and media controls
+
+Open **Notification apps** to enable or block apps observed during the current
+iPhone connection. All apps start enabled. Blocking removes their mirrored
+notifications immediately; enabling waits for subsequent phone events and does
+not replay old alerts. Filters are saved separately for each iPhone and cleared
+when that phone is successfully forgotten. App names are cached only for the
+current connection; identifiers are shown while names are unavailable.
+
+Media buttons are enabled only when the iPhone advertises support. Volume and
+shuffle/repeat labels follow phone updates, not button presses. The media player
+chooses skip intervals and may ignore a forwarded command.
+
+Tap **Use crown for volume** to give the volume row crown focus instead of
+scrolling. Positive rotation increases volume; negative rotation decreases it.
+Tap **Crown volume on** to return to scrolling. The mode ends when focus is lost,
+the app pauses, or media becomes unavailable. Volume follows phone-reported
+state, with at most five crown writes per second, one queued change and a
+500 ms expiry; fast rotations do not build a backlog. There is no progress ticker.
+
+Notification buttons use only non-empty labels supplied by the iPhone for
+advertised ANCS actions. A negative action may mean Decline rather than Dismiss;
+watch swipes remain local. Buttons expire when the notification changes, is
+filtered/removed, or the connection ends. Successful writes remove the buttons
+to prevent duplicate requests, but do not assume the phone removed the
+notification. Rejected actions show an error. Answering a call, when offered,
+does not establish call audio on the watch.
+
+These features have automated protocol/UI coverage; on-device behavior and
+battery impact still need verification. Filtering avoids notification-text reads
+for blocked apps, but initially identifying allowed notifications adds a BLE
+transaction and uncached app names require a separate lookup.
 
 ## Setup
 

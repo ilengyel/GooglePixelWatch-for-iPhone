@@ -21,7 +21,15 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,6 +37,9 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.wear.compose.material3.FilledTonalIconButton
 import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.IconButtonDefaults
@@ -36,13 +47,19 @@ import androidx.wear.compose.material3.IconToggleButton
 import androidx.wear.compose.material3.IconToggleButtonDefaults
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.Text
+import androidx.wear.compose.material3.TextButton
+import dev.toastmod.ancs.R
+import kotlin.math.roundToInt
 
 @Composable
 fun NowPlayingScreen(
     state: AMSState,
     onTogglePlayPause: () -> Unit,
     onPreviousTrack: () -> Unit,
-    onNextTrack: () -> Unit
+    onNextTrack: () -> Unit,
+    onCommand: (Byte) -> Unit = {},
+    onCrownVolume: (Byte) -> Unit = onCommand,
+    onCrownVolumeEnd: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -182,8 +199,93 @@ fun NowPlayingScreen(
                 )
             }
         }
+        AdditionalMediaControls(state, onCommand, onCrownVolume, onCrownVolumeEnd)
     }
 }
+
+@Composable
+private fun AdditionalMediaControls(
+    state: AMSState,
+    onCommand: (Byte) -> Unit,
+    onCrownVolume: (Byte) -> Unit,
+    onCrownVolumeEnd: () -> Unit
+) {
+    CrownVolumeControl(state, onCrownVolume, onCrownVolumeEnd) { crownModifier ->
+        Row(
+        modifier = crownModifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        MediaCommandButton(state, AMSCommand.VOLUME_DOWN, onCommand,
+            stringResource(R.string.volume_down)) {
+            Icon(Icons.AutoMirrored.Filled.VolumeDown, contentDescription = null)
+        }
+        Text(
+            text = state.player.volume?.let {
+                stringResource(R.string.volume_percent, (it * 100).roundToInt())
+            } ?: stringResource(R.string.volume_unknown),
+            modifier = Modifier.weight(1f)
+        )
+        MediaCommandButton(state, AMSCommand.VOLUME_UP, onCommand,
+            stringResource(R.string.volume_up)) {
+            Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null)
+        }
+        }
+    }
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    TextButton(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
+        Text(stringResource(if (expanded) R.string.fewer_controls else R.string.more_controls))
+    }
+    if (expanded) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            MediaCommandButton(state, AMSCommand.SKIP_BACKWARD, onCommand,
+                stringResource(R.string.skip_backward)) {
+                Icon(Icons.Filled.FastRewind, contentDescription = null)
+            }
+            MediaCommandButton(state, AMSCommand.SKIP_FORWARD, onCommand,
+                stringResource(R.string.skip_forward)) {
+                Icon(Icons.Filled.FastForward, contentDescription = null)
+            }
+        }
+        TextButton(
+            onClick = { onCommand(AMSCommand.ADVANCE_SHUFFLE) },
+            enabled = state.available && AMSCommand.ADVANCE_SHUFFLE in state.supportedCommands,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(stringResource(R.string.shuffle_mode, modeLabel(state.queue.shuffle)))
+        }
+        TextButton(
+            onClick = { onCommand(AMSCommand.ADVANCE_REPEAT) },
+            enabled = state.available && AMSCommand.ADVANCE_REPEAT in state.supportedCommands,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(stringResource(R.string.repeat_mode, modeLabel(state.queue.repeat)))
+        }
+    }
+}
+
+@Composable
+private fun MediaCommandButton(
+    state: AMSState,
+    command: Byte,
+    onCommand: (Byte) -> Unit,
+    description: String,
+    content: @Composable () -> Unit
+) {
+    FilledTonalIconButton(
+        onClick = { onCommand(command) },
+        enabled = state.available && command in state.supportedCommands,
+        modifier = Modifier.size(48.dp).semantics { contentDescription = description }
+    ) { content() }
+}
+
+@Composable
+private fun modeLabel(mode: AMSMode?): String = stringResource(when (mode) {
+    AMSMode.Off -> R.string.mode_off
+    AMSMode.One -> R.string.mode_one
+    AMSMode.All -> R.string.mode_all
+    null -> R.string.mode_unknown
+})
 
 /**
  * Single-line text that only scrolls (marquee) when it doesn't fit its available width; text

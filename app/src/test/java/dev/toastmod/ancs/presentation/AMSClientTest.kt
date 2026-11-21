@@ -12,6 +12,44 @@ import org.robolectric.annotation.Config
 @Config(sdk = [33], manifest = Config.NONE)
 class AMSClientTest {
     @Test
+    fun volumeAndPlaybackUpdatesPreserveEachOtherAndRejectInvalidValues() {
+        val client = AMSClient()
+        client.onEntityUpdate(byteArrayOf(0, 2, 0) + "0.42".encodeToByteArray())
+        client.onEntityUpdate(byteArrayOf(0, 1, 0) + "1,1.0,12".encodeToByteArray())
+        assertEquals(0.42f, client.state.value.player.volume)
+        for (value in listOf("", "x", "NaN", "Infinity", "-0.1", "1.1")) {
+            val expected = client.state.value
+            client.onEntityUpdate(byteArrayOf(0, 2, 0) + value.encodeToByteArray())
+            assertEquals(expected, client.state.value)
+        }
+        for (volume in listOf(0f, 1f)) {
+            client.onEntityUpdate(byteArrayOf(0, 2, 0) + volume.toString().encodeToByteArray())
+            assertEquals(volume, client.state.value.player.volume)
+            assertTrue(client.state.value.player.isPlaying)
+        }
+        client.reset()
+        assertEquals(null, client.state.value.player.volume)
+    }
+
+    @Test
+    fun queueModesFollowReportedValuesAndResetWithoutAcceptingReservedModes() {
+        val client = AMSClient()
+        for (mode in AMSMode.entries) {
+            client.onEntityUpdate(byteArrayOf(1, 2, 0) + mode.value.toString().encodeToByteArray())
+            client.onEntityUpdate(byteArrayOf(1, 3, 0) + mode.value.toString().encodeToByteArray())
+            assertEquals(AMSQueueInfo(mode, mode), client.state.value.queue)
+        }
+        val expected = client.state.value
+        for (value in listOf("", "-1", "3", "x", "1.0")) {
+            for (attribute in listOf<Byte>(2, 3)) {
+                client.onEntityUpdate(byteArrayOf(1, attribute, 0) + value.encodeToByteArray())
+                assertEquals(expected, client.state.value)
+            }
+        }
+        client.reset()
+        assertEquals(AMSQueueInfo(), client.state.value.queue)
+    }
+    @Test
     fun sharedStateReceivesMetadataAndPlaybackAndResetsOnDisconnect() {
         val client = AMSClient()
         client.setAvailable(true)

@@ -48,6 +48,12 @@ debugger tooling.
   the existing app first, which deletes its data.
 - Run **Watch: Logcat** to stream device logs; stop it with **Ctrl+C**.
 
+Gradle configuration and local build caching are enabled for all build tasks.
+Repeat builds reuse configuration and unchanged outputs; the first run may be
+slower. Avoid `clean` during normal development. Run only the tests you need,
+and combine build, test and lint tasks in one Gradle invocation when checking
+them together. Use `--no-configuration-cache` to diagnose cache-related issues.
+
 The same actions are available from PowerShell:
 
 ```powershell

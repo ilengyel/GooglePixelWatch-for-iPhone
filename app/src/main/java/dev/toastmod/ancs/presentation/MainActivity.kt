@@ -35,6 +35,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.ScreenScaffold
+import androidx.wear.compose.material3.Text
+import androidx.wear.compose.material3.TextButton
+import androidx.compose.ui.res.stringResource
 import androidx.wear.compose.foundation.BasicSwipeToDismissBox
 import androidx.lifecycle.lifecycleScope
 import dev.toastmod.ancs.R
@@ -215,6 +218,8 @@ class MainActivity : ComponentActivity() {
     private var bound = false
     private var chooser: AlertDialog? = null
     private var diagnosticPhone by mutableStateOf<BluetoothDevice?>(null)
+    private var showingApps by mutableStateOf(false)
+    private val emptyApps = MutableStateFlow<List<NotificationApp>>(emptyList())
     private var phoneChoices by mutableStateOf<List<BluetoothDevice>?>(null)
     private var selectedPhoneAddress by mutableStateOf<String?>(null)
     private val forgetInProgress get() = gattService?.forgettingPhone?.value == true
@@ -250,14 +255,32 @@ class MainActivity : ComponentActivity() {
             val forgetting by (service?.forgettingPhone ?: notForgetting).collectAsStateWithLifecycle()
             val phone = diagnosticPhone
             val choices = phoneChoices
+            val apps by (service?.notificationApps ?: emptyApps).collectAsStateWithLifecycle()
             PhoneScreenBackNavigation(
-                hasPreviousScreen = phone != null || choices != null,
+                hasPreviousScreen = phone != null || choices != null || showingApps,
                 navigationBlocked = forgetting,
                 onBack = {
-                    if (phone != null) diagnosticPhone = null else phoneChoices = null
+                    when {
+                        showingApps -> showingApps = false
+                        phone != null -> diagnosticPhone = null
+                        else -> phoneChoices = null
+                    }
                 }
             ) {
-                if (phone != null) {
+                if (showingApps) {
+                    AppFilterScreen(
+                        apps = apps,
+                        connected = phoneConnectionState == PhoneConnectionState.CONNECTED,
+                        onEnabledChange = { identifier, enabled ->
+                            try {
+                                check(service != null) { "No active iPhone connection" }
+                                service.setNotificationAppEnabled(identifier, enabled)
+                            } catch (error: IllegalStateException) {
+                                showMessage(error.message ?: "Could not update notification filter")
+                            }
+                        }
+                    )
+                } else if (phone != null) {
                     val isSelected = phone.address == selectedPhoneAddress
                     PhoneDiagnosticsScreen(
                         device = phone,
@@ -291,6 +314,10 @@ class MainActivity : ComponentActivity() {
                     onTogglePlayPause = { sendAMSCommand(AMSCommand.TOGGLE_PLAY_PAUSE) },
                     onNextTrack = { sendAMSCommand(AMSCommand.NEXT_TRACK) },
                     onPreviousTrack = { sendAMSCommand(AMSCommand.PREVIOUS_TRACK) },
+                    onCommand = { sendAMSCommand(it) },
+                    onCrownVolume = { sendAMSCommand(it, fromCrown = true) },
+                    onCrownVolumeEnd = { service?.cancelCrownVolume() },
+                    onNotificationApps = { showingApps = true },
                     status = connectionStatus,
                     connectionState = phoneConnectionState,
                     onChoosePhone = {
@@ -413,12 +440,12 @@ class MainActivity : ComponentActivity() {
     }
 
     @android.annotation.SuppressLint("MissingPermission")
-    private fun sendAMSCommand(command: Byte) {
+    private fun sendAMSCommand(command: Byte, fromCrown: Boolean = false) {
         val service = gattService
         when {
             !hasPermissions() -> showMessage("Bluetooth and notification permissions are required")
             service == null -> showMessage("No active iPhone connection")
-            else -> service.sendAMSCommand(command)
+            else -> service.sendAMSCommand(command, fromCrown)
         }
     }
 }
@@ -454,7 +481,11 @@ fun WearApp(
     onPreviousTrack: () -> Unit,
     status: String = "",
     connectionState: PhoneConnectionState = PhoneConnectionState.DISCONNECTED,
-    onChoosePhone: (() -> Unit)? = null
+    onChoosePhone: (() -> Unit)? = null,
+    onCommand: (Byte) -> Unit = {},
+    onNotificationApps: (() -> Unit)? = null,
+    onCrownVolume: (Byte) -> Unit = onCommand,
+    onCrownVolumeEnd: () -> Unit = {}
 ) {
     val state by amsState.collectAsStateWithLifecycle()
     ANCSTheme {
@@ -474,8 +505,16 @@ fun WearApp(
                             state = state,
                             onTogglePlayPause = onTogglePlayPause,
                             onNextTrack = onNextTrack,
-                            onPreviousTrack = onPreviousTrack
+                            onPreviousTrack = onPreviousTrack,
+                            onCommand = onCommand,
+                            onCrownVolume = onCrownVolume,
+                            onCrownVolumeEnd = onCrownVolumeEnd
                         )
+                        if (onNotificationApps != null) {
+                            TextButton(onClick = onNotificationApps) {
+                                Text(stringResource(R.string.notification_apps))
+                            }
+                        }
                         if (onChoosePhone != null) {
                             PhoneConnectionButton(
                                 connectionState = connectionState,

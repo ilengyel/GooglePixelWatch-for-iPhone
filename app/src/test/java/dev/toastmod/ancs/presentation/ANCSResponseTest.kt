@@ -19,6 +19,77 @@ class ANCSResponseTest {
         attribute(2, expected.subtitle) + attribute(3, expected.message)
 
     @Test
+    fun assemblesRequestedActionLabelsAtEveryFragmentBoundary() {
+        val bytes = byteArrayOf(0) + uid + attribute(1, "Call") + attribute(2, "") +
+            attribute(3, "") + attribute(6, "R\u00e9pondre") + attribute(7, "Decline")
+        val expected = ANCSAttributes("", "Call", "", "", "R\u00e9pondre", "Decline")
+        for (split in 1 until bytes.size) {
+            val parser = ANCSResponse(uid, setOf(1, 2, 3, 6, 7))
+            assertNull(parser.append(bytes.copyOfRange(0, split)))
+            assertEquals(expected, parser.append(bytes.copyOfRange(split, bytes.size)))
+        }
+        assertEquals(ANCSAttributes("", "", "", ""),
+            ANCSResponse(uid, setOf(6)).append(byteArrayOf(0) + uid + attribute(6, "")))
+        assertThrows(IllegalArgumentException::class.java) {
+            ANCSResponse(uid, setOf(6)).append(byteArrayOf(0) + uid + attribute(7, "Wrong action"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ANCSResponse(uid, setOf(6)).append(byteArrayOf(0) + uid + attribute(6, "x".repeat(1025)))
+        }
+    }
+
+    @Test
+    fun completesOnlyTheRequestedNotificationSubset() {
+        val identity = byteArrayOf(0) + uid + attribute(0, "com.example.app")
+        val text = byteArrayOf(0) + uid + attribute(1, "Title") +
+            attribute(2, "") + attribute(3, "Message")
+        assertEquals(ANCSAttributes("com.example.app", "", "", ""),
+            ANCSResponse(uid, setOf(0)).append(identity))
+        assertEquals(ANCSAttributes("", "Title", "", "Message"),
+            ANCSResponse(uid, setOf(1, 2, 3)).append(text))
+        assertThrows(IllegalArgumentException::class.java) {
+            ANCSResponse(uid, setOf(0)).append(text)
+        }
+    }
+
+    @Test
+    fun assemblesAppNamesAtEveryFragmentBoundaryIncludingEmptyAndMultibyteNames() {
+        for (name in listOf("", "Caf\u00e9 \ud83c\udfb5")) {
+            val bytes = byteArrayOf(1) + "com.example.app".encodeToByteArray() +
+                byteArrayOf(0) + attribute(0, name)
+            for (split in 1 until bytes.size) {
+                val parser = ANCSAppResponse("com.example.app")
+                assertNull(parser.append(bytes.copyOfRange(0, split)))
+                assertEquals(name, parser.append(bytes.copyOfRange(split, bytes.size)))
+            }
+            val parser = ANCSAppResponse("com.example.app")
+            bytes.dropLast(1).forEach { assertNull(parser.append(byteArrayOf(it))) }
+            assertEquals(name, parser.append(byteArrayOf(bytes.last())))
+        }
+    }
+
+    @Test
+    fun rejectsMalformedAppResponsesAndOversizedNames() {
+        val header = byteArrayOf(1) + "app".encodeToByteArray() + byteArrayOf(0)
+        for (bytes in listOf(
+            byteArrayOf(0) + header.drop(1).toByteArray(),
+            byteArrayOf(1) + "other".encodeToByteArray() + byteArrayOf(0),
+            header + attribute(1, "Wrong attribute"),
+            header + attribute(0, "") + attribute(0, ""),
+            header + attribute(0, "x".repeat(1025)),
+            ByteArray(4097)
+        )) {
+            assertThrows(IllegalArgumentException::class.java) {
+                ANCSAppResponse("app").append(bytes)
+            }
+        }
+        val parser = ANCSAppResponse("app")
+        assertNull(parser.append(header + byteArrayOf(0)))
+        assertEquals("x".repeat(1024), parser.append(
+            byteArrayOf(0, 4) + "x".repeat(1024).encodeToByteArray()))
+    }
+
+    @Test
     fun waitsForEveryAttributeAtEveryPossibleFragmentBoundary() {
         val bytes = response()
         for (split in 1 until bytes.size) {
