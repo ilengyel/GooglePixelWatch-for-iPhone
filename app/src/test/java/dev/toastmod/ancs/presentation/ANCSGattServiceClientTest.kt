@@ -234,7 +234,7 @@ class ANCSGattServiceClientTest {
     }
 
     @Test
-    fun crownWorkCoalescesExpiresAndCanBeCancelledWithoutBuildingACommandBacklog() {
+    fun crownWorkCoalescesAndExpiresWithoutBuildingACommandBacklog() {
         val connection = connected()
         connection.notify(connection.remote, byteArrayOf(2, 5, 6))
         scheduler.runCurrent()
@@ -253,14 +253,6 @@ class ANCSGattServiceClientTest {
         assertFalse(connection.closed)
 
         ShadowSystemClock.advanceBy(Duration.ofMillis(200))
-        client.sendAMSCommand(2)
-        scheduler.runCurrent()
-        client.sendCrownVolume(AMSCommand.VOLUME_UP)
-        client.cancelCrownVolume()
-        connection.finishNext()
-        scheduler.runCurrent()
-        assertTrue(connection.pending.isEmpty())
-
         client.sendAMSCommand(2)
         scheduler.runCurrent()
         client.sendCrownVolume(AMSCommand.VOLUME_UP)
@@ -301,14 +293,15 @@ class ANCSGattServiceClientTest {
     fun mediaSubscriptionsIncludeOnlyUsedVolumeAndQueueAttributes() {
         val connection = connected()
         val subscriptions = connection.operations.filter { it.kind == "write" && it.uuid == AMS_ENTITY_UPDATE }
-        assertEquals(listOf(listOf<Byte>(2, 0, 2), listOf<Byte>(0, 1, 2), listOf<Byte>(1, 2, 3)),
+        assertEquals(listOf(listOf<Byte>(2, 0, 1, 2, 3), listOf<Byte>(0, 1, 2), listOf<Byte>(1, 2, 3)),
             subscriptions.map { it.value.toList() })
         playing(connection)
+        val beforeRefresh = connection.operations.size
         advance(3_000)
         drain(connection)
         assertEquals(subscriptions.map { it.value.toList() },
-            connection.operations.filter { it.kind == "write" && it.uuid == AMS_ENTITY_UPDATE }
-                .takeLast(3).map { it.value.toList() })
+            connection.operations.drop(beforeRefresh).filter { it.kind == "write" && it.uuid == AMS_ENTITY_UPDATE }
+                .map { it.value.toList() })
     }
 
     @Test

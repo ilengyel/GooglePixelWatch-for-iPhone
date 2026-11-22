@@ -35,6 +35,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.reflect.InvocationTargetException
 
@@ -51,6 +52,7 @@ class ANCSAndroidService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var gattClient: ANCSGattServiceClient? = null
     private var targetAddress: String? = null
+    private lateinit var nativeMedia: IPhoneMediaSession
     private val mutableForgettingPhone = MutableStateFlow(false)
     val forgettingPhone = mutableForgettingPhone.asStateFlow()
 
@@ -101,6 +103,16 @@ class ANCSAndroidService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        nativeMedia = IPhoneMediaSession(this, { command, volume ->
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                sendAMSCommand(command, fromCrown = volume)
+            } else {
+                showActionError(getString(R.string.media_bluetooth_permission))
+            }
+        }, ::showActionError)
+        serviceScope.launch { mediaState.collect { nativeMedia.update(it) } }
         val manager = getSystemService(NotificationManager::class.java)
         manager.activeNotifications.filter { it.tag == ANCSNotification.TAG }.forEach {
             manager.cancel(it.tag, it.id)
@@ -119,10 +131,17 @@ class ANCSAndroidService : Service() {
         ) {
             Log.e("ANCS", "Cannot start: Bluetooth and notification permissions are required")
             stopConnection("Bluetooth and notification permissions required")
-            if (intent?.action == ANCSNotificationAction.INTENT_ACTION) {
+            if (intent?.action == ANCSNotificationAction.INTENT_ACTION ||
+                intent?.action == IPhoneMediaSession.INTENT_ACTION
+            ) {
                 showActionError("Bluetooth and notification permissions required")
             }
             return START_NOT_STICKY
+        }
+        if (intent?.action == IPhoneMediaSession.INTENT_ACTION) {
+            nativeMedia.handleIntent(intent)
+            if (targetAddress == null) stopSelfResult(startId)
+            return if (targetAddress == null) START_NOT_STICKY else START_STICKY
         }
         if (intent?.action == ANCSNotificationAction.INTENT_ACTION) {
             val action = ANCSNotificationAction.fromIntent(intent)
@@ -205,10 +224,6 @@ class ANCSAndroidService : Service() {
             return
         }
         if (fromCrown) client.sendCrownVolume(command) else client.sendAMSCommand(command)
-    }
-
-    fun cancelCrownVolume() {
-        gattClient?.cancelCrownVolume()
     }
 
     private fun showActionError(message: String) {
@@ -302,6 +317,7 @@ class ANCSAndroidService : Service() {
         unregisterReceiver(bluetoothReceiver)
         serviceScope.cancel()
         closeClient()
+        nativeMedia.close()
         targetAddress = null
         mutableStatus.value = "Disconnected"
         super.onDestroy()
@@ -310,6 +326,8 @@ class ANCSAndroidService : Service() {
     private fun closeClient() {
         gattClient?.close()
         gattClient = null
+        amsClient.reset()
+        nativeMedia.update(AMSState())
         mutableConnectionState.value = PhoneConnectionState.DISCONNECTED
     }
 

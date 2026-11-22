@@ -11,6 +11,10 @@
 
     <uses-feature android:name="android.hardware.type.watch" />
 
+    <queries>
+        <package android:name="com.google.android.wearable.media.sessions" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

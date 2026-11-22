@@ -55,7 +55,7 @@ class MainActivityNavigationTest {
         val media = MutableStateFlow(AMSState())
         compose.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
-                WearApp(media, {}, {}, {})
+                WearApp(media, {})
             }
         }
         compose.runOnIdle {

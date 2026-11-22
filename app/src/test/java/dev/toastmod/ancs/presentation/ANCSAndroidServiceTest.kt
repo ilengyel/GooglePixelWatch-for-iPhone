@@ -92,6 +92,34 @@ class ANCSAndroidServiceTest {
         context.getSharedPreferences(ANCSAndroidService.PREFERENCES, Context.MODE_PRIVATE)
 
     @Test
+    fun nativeMediaNotificationUsesTheExistingGattConnectionAndClearsOnServiceShutdown() {
+        service.onStartCommand(intent(), 0, 1)
+        val connection = phone.connections.single()
+        connection.callback.onConnectionStateChange(connection.gatt, BluetoothGatt.GATT_SUCCESS,
+            BluetoothProfile.STATE_CONNECTED)
+        scheduler.runCurrent()
+        while (connection.pending.isNotEmpty()) {
+            connection.finishNext()
+            scheduler.runCurrent()
+        }
+        connection.notify(connection.remote, byteArrayOf(2, 3, 4))
+        connection.notify(connection.update, byteArrayOf(2, 2, 0) + "Track".encodeToByteArray())
+        connection.notify(connection.update, byteArrayOf(0, 1, 0) + "1,1,12".encodeToByteArray())
+        scheduler.runCurrent()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val notification = manager.activeNotifications.single { it.id == IPhoneMediaSession.NOTIFICATION_ID }
+            .notification
+        assertEquals(listOf("Previous", "Pause", "Next"), notification.actions.map { it.title.toString() })
+        val action = shadowOf(notification.actions[1].actionIntent).savedIntent
+        assertEquals(Service.START_STICKY, service.onStartCommand(action, 0, 2))
+        scheduler.runCurrent()
+        assertEquals(listOf<Byte>(2), connection.pending.single().value.toList())
+        assertEquals(1, phone.connections.size)
+        destroyService()
+        assertTrue(manager.activeNotifications.none { it.id == IPhoneMediaSession.NOTIFICATION_ID })
+    }
+
+    @Test
     fun notificationPendingIntentRoutesToTheExistingServiceAndWritesAnActionWithoutDataResponse() {
         service.onStartCommand(intent(), 0, 1)
         val connection = phone.connections.single()

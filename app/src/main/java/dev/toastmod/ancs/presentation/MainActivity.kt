@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothDevice
 import android.content.ComponentName
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
@@ -20,6 +21,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.systemGestureExclusion
@@ -311,12 +313,7 @@ class MainActivity : ComponentActivity() {
                     )
                 } else WearApp(
                     amsState = service?.mediaState ?: disconnectedState,
-                    onTogglePlayPause = { sendAMSCommand(AMSCommand.TOGGLE_PLAY_PAUSE) },
-                    onNextTrack = { sendAMSCommand(AMSCommand.NEXT_TRACK) },
-                    onPreviousTrack = { sendAMSCommand(AMSCommand.PREVIOUS_TRACK) },
-                    onCommand = { sendAMSCommand(it) },
-                    onCrownVolume = { sendAMSCommand(it, fromCrown = true) },
-                    onCrownVolumeEnd = { service?.cancelCrownVolume() },
+                    onOpenMediaControls = ::openMediaControls,
                     onNotificationApps = { showingApps = true },
                     status = connectionStatus,
                     connectionState = phoneConnectionState,
@@ -439,13 +436,18 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
-    @android.annotation.SuppressLint("MissingPermission")
-    private fun sendAMSCommand(command: Byte, fromCrown: Boolean = false) {
-        val service = gattService
-        when {
-            !hasPermissions() -> showMessage("Bluetooth and notification permissions are required")
-            service == null -> showMessage("No active iPhone connection")
-            else -> service.sendAMSCommand(command, fromCrown)
+    private fun openMediaControls() {
+        val intent = NativeMediaControls.intent(this)
+        if (intent == null) {
+            showMessage(getString(R.string.native_media_unavailable))
+            return
+        }
+        try {
+            startActivity(intent)
+        } catch (error: ActivityNotFoundException) {
+            showMessage(getString(R.string.native_media_unavailable))
+        } catch (error: SecurityException) {
+            showMessage(getString(R.string.native_media_unavailable))
         }
     }
 }
@@ -476,16 +478,11 @@ internal fun PhoneScreenBackNavigation(
 @Composable
 fun WearApp(
     amsState: StateFlow<AMSState>,
-    onTogglePlayPause: () -> Unit,
-    onNextTrack: () -> Unit,
-    onPreviousTrack: () -> Unit,
+    onOpenMediaControls: () -> Unit,
     status: String = "",
     connectionState: PhoneConnectionState = PhoneConnectionState.DISCONNECTED,
     onChoosePhone: (() -> Unit)? = null,
-    onCommand: (Byte) -> Unit = {},
-    onNotificationApps: (() -> Unit)? = null,
-    onCrownVolume: (Byte) -> Unit = onCommand,
-    onCrownVolumeEnd: () -> Unit = {}
+    onNotificationApps: (() -> Unit)? = null
 ) {
     val state by amsState.collectAsStateWithLifecycle()
     ANCSTheme {
@@ -501,15 +498,23 @@ fun WearApp(
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        NowPlayingScreen(
-                            state = state,
-                            onTogglePlayPause = onTogglePlayPause,
-                            onNextTrack = onNextTrack,
-                            onPreviousTrack = onPreviousTrack,
-                            onCommand = onCommand,
-                            onCrownVolume = onCrownVolume,
-                            onCrownVolumeEnd = onCrownVolumeEnd
+                        Text(
+                            text = if (state.track.hasData) state.track.title.ifBlank {
+                                stringResource(R.string.media_unknown_title)
+                            } else stringResource(when {
+                                !state.available -> R.string.media_unavailable
+                                state.hasNativeMedia() -> R.string.iphone_media
+                                else -> R.string.media_nothing_playing
+                            }),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                         )
+                        TextButton(
+                            onClick = onOpenMediaControls,
+                            enabled = state.hasNativeMedia(),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Text(stringResource(R.string.native_media_controls))
+                        }
                         if (onNotificationApps != null) {
                             TextButton(onClick = onNotificationApps) {
                                 Text(stringResource(R.string.notification_apps))
@@ -544,9 +549,7 @@ fun DefaultPreview() {
                     AMSCommand.PREVIOUS_TRACK)
             )
         ),
-        onTogglePlayPause = {},
-        onNextTrack = {},
-        onPreviousTrack = {},
+        onOpenMediaControls = {},
         connectionState = PhoneConnectionState.CONNECTED,
         onChoosePhone = {}
     )

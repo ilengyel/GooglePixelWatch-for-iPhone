@@ -10,27 +10,28 @@ flowchart LR
     Phone["iPhone<br/>Notifications and media"]
     Bridge["Watch background service<br/>Bluetooth connection and protocol handling"]
     Notifications["Native watch notifications"]
-    UI["Watch UI<br/>Media controls and connection status"]
+    UI["Watch UI<br/>Connection management"]
+    Media["Native Wear media controls"]
 
     Phone <-->|"Bluetooth LE: ANCS / AMS"| Bridge
     Bridge --> Notifications
     Bridge -->|"State updates"| UI
-    UI -->|"User commands"| Bridge
+    Bridge -->|"Remote media session"| Media
+    Media -->|"Playback and volume commands"| Bridge
 ```
 
 ## Responsibilities
 
 - **Watch UI:** requests permissions, lets the user select a paired phone, and
-  displays media and connection state. It sends user actions to the background
-  service rather than managing Bluetooth itself.
+  displays connection state and opens native media controls.
 - **Background service:** owns the connection to the selected phone and keeps
   it active independently of the UI, using Android's connected-device
   foreground-service lifecycle.
 - **Bluetooth and protocol handling:** discovers available services, subscribes
   to updates, serializes Bluetooth operations, and validates incoming data.
 - **Notification and media handling:** turns phone events into native watch
-  notifications and observable media state, and sends supported playback
-  commands back to the phone.
+  notifications and a remote Android media session, and sends supported playback
+  and volume commands back to the phone.
 
 These are responsibilities within one Android application, not separate
 deployments.
@@ -45,10 +46,10 @@ enabling does not replay old alerts.
 iPhone-advertised action buttons send validated commands through the service.
 Swiping dismisses only the watch copy; text replies are not supported.
 
-**Media:** the iPhone pushes track and playback updates to the watch UI.
-User playback actions are queued and sent to the phone; the UI follows the
-phone's reported state rather than assuming a command succeeded. Playback,
-volume and shuffle/repeat controls follow the iPhone's advertised capabilities.
+**Media:** iPhone updates populate a service-owned remote media session and
+media notification. Native controls send supported commands back to the phone;
+state remains phone-reported. Audio stays on the iPhone. Native UI behavior
+requires watch verification; artwork and arbitrary seeking are unavailable.
 
 ## Lifecycle and recovery
 

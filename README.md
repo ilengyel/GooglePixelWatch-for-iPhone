@@ -20,10 +20,10 @@ Huge thanks to [loud-at-heart](https://github.com/loud-at-heart) for the [AMS](h
   per-iPhone app filtering. Notifications expose the iPhone's supplied action
   labels when positive/negative actions are available.
 - **Now Playing (AMS):** subscribes to the iPhone's current media session
-  and shows a live-updating control card — track title/artist, play/pause,
-  and skip previous/next — that sends remote-control commands back to the phone.
-  Volume buttons show the phone-reported percentage. **More controls** exposes
-  skip backward/forward and shuffle/repeat cycling when supported by the player.
+  and exposes it through an Android remote media session and native media
+  notification. Wear OS renders playback controls; commands go back to the
+  iPhone, where audio continues playing. The custom in-app player is replaced
+  by a **Media controls** entry point.
 
 ### Notification apps and media controls
 
@@ -34,16 +34,23 @@ not replay old alerts. Filters are saved separately for each iPhone and cleared
 when that phone is successfully forgotten. App names are cached only for the
 current connection; identifiers are shown while names are unavailable.
 
-Media buttons are enabled only when the iPhone advertises support. Volume and
-shuffle/repeat labels follow phone updates, not button presses. The media player
-chooses skip intervals and may ignore a forwarded command.
+Tap **Media controls** to open Google's installed Wear OS media-controls app,
+or use the **iPhone media** notification. If that app has no accessible launcher,
+ANCS shows an error directing you to the native notification controls.
+Native screen layout, session selection, auto-launch and crown behavior depend
+on the watch's Wear OS version and still require on-device verification.
 
-Tap **Use crown for volume** to give the volume row crown focus instead of
-scrolling. Positive rotation increases volume; negative rotation decreases it.
-Tap **Crown volume on** to return to scrolling. The mode ends when focus is lost,
-the app pauses, or media becomes unavailable. Volume follows phone-reported
-state, with at most five crown writes per second, one queued change and a
-500 ms expiry; fast rotations do not build a backlog. There is no progress ticker.
+The session advertises only iPhone-supported commands. Remote volume adjustments
+target the iPhone, not watch audio, and use the existing bounded BLE queue
+(at most five writes per second, one queued direction and a 500 ms expiry).
+Volume and playback state follow phone updates, not button presses.
+Native volume adjustment is enabled after the first phone-reported volume arrives.
+Skip intervals and shuffle/repeat cycling are exposed as session custom actions;
+whether they appear depends on the system UI. The player chooses skip intervals
+and may ignore commands. AMS supplies no artwork or arbitrary seek operation.
+Playback timing and duration are published without a polling loop; the native
+UI can extrapolate progress. The session and notification clear on disconnect
+or when Apple Music closes and clears its playback and track information.
 
 Notification buttons use only non-empty labels supplied by the iPhone for
 advertised ANCS actions. A negative action may mean Decline rather than Dismiss;
@@ -74,9 +81,8 @@ transaction and uncached app names require a separate lookup.
   **Choose iPhone** to change it. It does not guess based on a device name.
 - On your iPhone, accept the prompt asking to share **Notifications** and
   **Media Controls** with the watch.
-- Play something on your iPhone and open the app on the watch — the Now
-  Playing card should show up with working controls. Text yourself to test
-  notifications.
+- Play something on your iPhone, then use **Media controls** in the app or the
+  **iPhone media** notification on the watch. Text yourself to test notifications.
 
 If notifications or media controls are unavailable, check the iPhone's Bluetooth
 sharing settings.

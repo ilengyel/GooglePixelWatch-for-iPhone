@@ -20,7 +20,6 @@ import dev.toastmod.ancs.R
 import com.google.common.util.concurrent.ListenableFuture
 import dev.toastmod.ancs.presentation.AMSClient
 import dev.toastmod.ancs.presentation.AMSState
-import dev.toastmod.ancs.presentation.NowPlayingScreen
 import kotlinx.coroutines.flow.StateFlow
 
 private const val RESOURCES_VERSION = "0"

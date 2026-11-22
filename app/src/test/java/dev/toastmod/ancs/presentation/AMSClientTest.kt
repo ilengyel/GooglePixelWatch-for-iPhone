@@ -93,13 +93,26 @@ class AMSClientTest {
             client.onEntityUpdate(ByteArray(size))
             assertEquals("Packet size $size", expected, client.state.value)
         }
-        val invalid = listOf("", "1", "1,1.0", "x,1.0,12", "-1,1.0,12", "4,1.0,12",
+        val invalid = listOf("", "1", "1,1.0", "1,,", "0,0,", "x,1.0,12", "-1,1.0,12", "4,1.0,12",
             "1,x,12", "1,1.0,x", "1,NaN,12", "1,Infinity,12", "1,-Infinity,12",
-            "1,1.0,NaN", "1,1.0,Infinity", "1,1.0,-Infinity")
+            "1,1.0,NaN", "1,1.0,Infinity", "1,1.0,-Infinity", "1,1.0,-1")
         for (value in invalid) {
             client.onEntityUpdate(byteArrayOf(0, 1, 0) + value.encodeToByteArray())
             assertEquals("Playback value '$value'", expected, client.state.value)
         }
+    }
+
+    @Test
+    fun appleMusicCloseMarksPlaybackPausedWithUnknownTimingAndPreservesVolume() {
+        val client = AMSClient()
+        client.onEntityUpdate(byteArrayOf(0, 2, 0) + "0.5".encodeToByteArray())
+        client.onEntityUpdate(byteArrayOf(0, 1, 0) + "1,1.0,12.5".encodeToByteArray())
+        val playing = client.state.value.player
+        val pausedWithoutTiming = "0,,".encodeToByteArray()
+        client.onEntityUpdate(byteArrayOf(0, 1, 1) + pausedWithoutTiming)
+        assertEquals(playing, client.state.value.player)
+        client.onEntityUpdate(byteArrayOf(0, 1, 0) + pausedWithoutTiming)
+        assertEquals(AMSPlayerInfo(playbackRate = 0f, volume = 0.5f, playbackState = 0), client.state.value.player)
     }
 
     @Test
@@ -125,5 +138,23 @@ class AMSClientTest {
             client.onEntityUpdate(byteArrayOf(entity.toByte(), 42, 0) + "Unexpected".encodeToByteArray())
             assertEquals("Entity $entity", expected, client.state.value)
         }
+    }
+
+    @Test
+    fun durationClearsWhenEmptyRejectsInvalidValuesAndDoesNotRetimestampPlayback() {
+        val client = AMSClient()
+        client.onEntityUpdate(byteArrayOf(0, 1, 0) + "1,1,12".encodeToByteArray())
+        val timestamp = client.state.value.player.playbackUpdatedAt
+        client.onEntityUpdate(byteArrayOf(2, 3, 0) + "180.5".encodeToByteArray())
+        client.onEntityUpdate(byteArrayOf(0, 2, 0) + "0.5".encodeToByteArray())
+        assertEquals(180.5f, client.state.value.track.duration, 0f)
+        assertEquals(timestamp, client.state.value.player.playbackUpdatedAt)
+        for (value in listOf("NaN", "Infinity", "-1", "bad")) {
+            client.onEntityUpdate(byteArrayOf(2, 3, 0) + value.encodeToByteArray())
+            assertEquals(180.5f, client.state.value.track.duration, 0f)
+        }
+        client.onEntityUpdate(byteArrayOf(2, 3, 0))
+        assertEquals(0f, client.state.value.track.duration, 0f)
+        assertEquals(timestamp, client.state.value.player.playbackUpdatedAt)
     }
 }

@@ -333,7 +333,8 @@ class ANCSGattServiceClient(
 
     private suspend fun registerMedia(gatt: BluetoothGatt, update: BluetoothGattCharacteristic) {
         write(gatt, update, byteArrayOf(AMSEntityID.Track.b,
-            AMSTrackAttributeID.Artist.b, AMSTrackAttributeID.Title.b))
+            AMSTrackAttributeID.Artist.b, AMSTrackAttributeID.Album.b,
+            AMSTrackAttributeID.Title.b, AMSTrackAttributeID.Duration.b))
         write(gatt, update, byteArrayOf(AMSEntityID.Player.b,
             AMSPlayerAttributeID.PlaybackInfo.b, AMSPlayerAttributeID.Volume.b))
         write(gatt, update, byteArrayOf(AMSEntityID.Queue.b,
@@ -475,10 +476,6 @@ class ANCSGattServiceClient(
             crownQueued = true
             enqueue(Operation.CrownVolume)
         }
-    }
-
-    fun cancelCrownVolume() {
-        crownCommand = null
     }
 
     fun sendNotificationAction(action: ANCSNotificationAction) {

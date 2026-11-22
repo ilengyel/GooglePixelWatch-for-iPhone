@@ -1,6 +1,7 @@
 package dev.toastmod.ancs.presentation
 
 import android.util.Log
+import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -12,6 +13,8 @@ val AMS_ENTITY_UPDATE: UUID = UUID.fromString("2F7CABCE-808D-411F-9A0C-BB92BA96C
 val AMS_ENTITY_ATTRIBUTE: UUID = UUID.fromString("C6B2F38C-23AB-46D8-A6AB-A3A870BBD5D7")
 
 object AMSCommand {
+    const val PLAY: Byte = 0
+    const val PAUSE: Byte = 1
     const val TOGGLE_PLAY_PAUSE: Byte = 2
     const val NEXT_TRACK: Byte = 3
     const val PREVIOUS_TRACK: Byte = 4
@@ -66,7 +69,9 @@ data class AMSPlayerInfo(
     val isPlaying: Boolean = false,
     val playbackRate: Float = 1f,
     val elapsedTime: Float = 0f,
-    val volume: Float? = null
+    val volume: Float? = null,
+    val playbackState: Int? = null,
+    val playbackUpdatedAt: Long? = null
 )
 
 data class AMSState(
@@ -114,7 +119,15 @@ class AMSClient {
                     AMSTrackAttributeID.Title.b  -> cur.copy(title = value)
                     AMSTrackAttributeID.Artist.b -> cur.copy(artist = value)
                     AMSTrackAttributeID.Album.b  -> cur.copy(album = value)
-                    AMSTrackAttributeID.Duration.b -> cur.copy(duration = value.toFloatOrNull() ?: 0f)
+                    AMSTrackAttributeID.Duration.b -> {
+                        val duration = if (value.isEmpty()) 0f else value.toFloatOrNull()
+                        if (duration != null && duration.isFinite() && duration >= 0f) {
+                            cur.copy(duration = duration)
+                        } else {
+                            Log.w("AMS", "Invalid track duration")
+                            cur
+                        }
+                    }
                     else -> cur
                 }
                 _state.value = _state.value.copy(track = updated)
@@ -122,18 +135,31 @@ class AMSClient {
 
             AMSEntityID.Player -> {
                 if (attributeId == AMSPlayerAttributeID.PlaybackInfo.b) {
+                    // Apple Music reports paused with no timing data when the player closes.
+                    if (value == "0,," && (data[2].toInt() and 1) == 0) {
+                        _state.value = _state.value.copy(player = _state.value.player.copy(
+                            isPlaying = false,
+                            playbackRate = 0f,
+                            elapsedTime = 0f,
+                            playbackState = 0,
+                            playbackUpdatedAt = null
+                        ))
+                        return
+                    }
                     val parts = value.split(",")
                     val playbackState = parts.getOrNull(0)?.toIntOrNull()
                     val rate = parts.getOrNull(1)?.toFloatOrNull()
                     val elapsed = parts.getOrNull(2)?.toFloatOrNull()
                     if (playbackState != null && playbackState in 0..3 && rate != null && rate.isFinite() &&
-                        elapsed != null && elapsed.isFinite()
+                        elapsed != null && elapsed.isFinite() && elapsed >= 0f
                     ) {
                         _state.value = _state.value.copy(
                             player = _state.value.player.copy(
                                 isPlaying = playbackState == 1,
                                 playbackRate = rate,
-                                elapsedTime = elapsed
+                                elapsedTime = elapsed,
+                                playbackState = playbackState,
+                                playbackUpdatedAt = SystemClock.elapsedRealtime()
                             )
                         )
                     } else {
