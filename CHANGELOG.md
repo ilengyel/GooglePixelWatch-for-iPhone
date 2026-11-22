@@ -4,6 +4,14 @@ Changes from the original fork baseline. Versions follow Semantic Versioning,
 newest first; keep `versionName` in sync and increment `versionCode` for each
 app version.
 
+## [2.0.2] - 2026-11-23
+
+- Replaced the in-app player with native Wear OS media controls for iPhone
+  playback and volume. Audio still plays on the iPhone.
+- Clear stale media controls when Apple Music closes or the iPhone disconnects.
+- Put the Notification apps bell beside the iPhone connection icon.
+- Return to the main screen after two minutes or more in the background.
+
 ## [2.0.1] - 2026-11-19
 
 - Cached app names and per-iPhone notification filters.

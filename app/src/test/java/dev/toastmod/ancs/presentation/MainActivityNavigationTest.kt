@@ -1,7 +1,9 @@
 package dev.toastmod.ancs.presentation
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.Intent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,11 +15,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeRight
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -25,6 +31,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.test.core.app.ActivityScenario
+import dev.toastmod.ancs.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.mockito.Mockito.clearInvocations
 import org.mockito.Mockito.never
@@ -35,6 +43,8 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadows.ShadowSystemClock
+import java.time.Duration
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33, 35])
@@ -164,5 +174,58 @@ class MainActivityNavigationTest {
         }
         compose.onNodeWithTag("diagnostics").performTouchInput { swipeRight() }
         compose.runOnIdle { assertEquals(1, backCount) }
+    }
+}
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33, 35])
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class MainActivityReopenTest {
+    @get:Rule
+    val compose = createEmptyComposeRule()
+
+    @Test
+    fun reopeningKeepsNotificationAppsUntilTwoMinutesAndThenReturnsToMain() {
+        val context = RuntimeEnvironment.getApplication()
+        shadowOf(context).grantPermissions(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.POST_NOTIFICATIONS
+        )
+        val adapter = context.getSystemService(BluetoothManager::class.java).adapter
+        val phone = TestBluetoothDevice().device
+        `when`(phone.alias).thenReturn("Paired iPhone")
+        shadowOf(adapter).setBondedDevices(setOf(phone))
+        shadowOf(adapter).setState(BluetoothAdapter.STATE_ON)
+
+        val notificationApps = context.getString(R.string.notification_apps)
+        val bell = compose.onNodeWithContentDescription(notificationApps)
+        val connection = compose.onNodeWithContentDescription(context.getString(R.string.choose_iphone))
+        val notificationHeader = compose.onNodeWithText(notificationApps)
+        val pairedPhone = compose.onNodeWithText("Paired iPhone")
+
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            pairedPhone.assertExists()
+            scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
+
+            val phoneBounds = connection.fetchSemanticsNode().boundsInRoot
+            val bellBounds = bell.fetchSemanticsNode().boundsInRoot
+            assertEquals(phoneBounds.center.y, bellBounds.center.y, 0.5f)
+            assertTrue(phoneBounds.right < bellBounds.left)
+            bell.performClick()
+            notificationHeader.assertExists()
+
+            scenario.moveToState(Lifecycle.State.CREATED)
+            ShadowSystemClock.advanceBy(Duration.ofMillis(119_999))
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            notificationHeader.assertExists()
+
+            scenario.moveToState(Lifecycle.State.CREATED)
+            ShadowSystemClock.advanceBy(Duration.ofMinutes(2))
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            notificationHeader.assertDoesNotExist()
+            bell.assertExists()
+            connection.performClick()
+            pairedPhone.assertExists()
+        }
     }
 }
