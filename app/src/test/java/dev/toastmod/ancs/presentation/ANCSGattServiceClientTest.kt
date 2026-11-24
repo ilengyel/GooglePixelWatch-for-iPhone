@@ -495,6 +495,72 @@ class ANCSGattServiceClientTest {
     }
 
     @Test
+    fun serviceChangesDuringDiscoveryCoalesceAndRediscoverWithoutClosingGatt() {
+        val connection = startConnection()
+        repeat(2) { connection.callback.onServiceChanged(connection.gatt) }
+        scheduler.runCurrent()
+
+        assertEquals("services", connection.pending.single().kind)
+        assertEquals(1, connection.operations.size)
+        assertFalse(connection.closed)
+        connection.finishNext()
+        scheduler.runCurrent()
+        assertEquals("services", connection.pending.single().kind)
+        assertFalse(PhoneConnectionState.CONNECTED in connectionStates)
+
+        drain(connection)
+        assertEquals(2, connection.operations.count { it.kind == "services" })
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
+        assertTrue(media.state.value.available)
+        assertFalse(connection.closed)
+        assertEquals(1, phone.connections.size)
+    }
+
+    @Test
+    fun serviceChangeDrainsCurrentWriteAndDropsQueuedCommandsBeforeRediscovery() {
+        val connection = connected()
+        val action = retainedAction()
+        connection.notify(connection.remote, byteArrayOf(2, 3))
+        scheduler.runCurrent()
+        client.sendAMSCommand(2)
+        client.sendAMSCommand(3)
+        scheduler.runCurrent()
+
+        connection.callback.onServiceChanged(connection.gatt)
+        scheduler.runCurrent()
+        assertEquals(PhoneConnectionState.CONNECTING, connectionStates.last())
+        assertEquals(2.toByte(), connection.pending.single().value.single())
+        connection.finishNext(status = BluetoothGatt.GATT_WRITE_NOT_PERMITTED)
+        scheduler.runCurrent()
+
+        assertEquals("services", connection.pending.single().kind)
+        assertFalse(notifications.isActionAvailable(action))
+        assertFalse(media.state.value.available)
+        drain(connection)
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
+        assertEquals(listOf<Byte>(2), connection.operations
+            .filter { it.kind == "write" && it.uuid == AMS_REMOTE_COMMAND }.map { it.value.single() })
+        assertFalse(connection.closed)
+    }
+
+    @Test
+    fun serviceChangeWhileAwaitingNotificationDataRestartsWithoutWaitingForResponse() {
+        val connection = connected()
+        event(connection, 1)
+        connection.finishNext()
+        scheduler.runCurrent()
+        assertTrue(connection.pending.isEmpty())
+
+        connection.callback.onServiceChanged(connection.gatt)
+        scheduler.runCurrent()
+
+        assertEquals("services", connection.pending.single().kind)
+        assertFalse(connection.closed)
+        drain(connection)
+        assertEquals(PhoneConnectionState.CONNECTED, connectionStates.last())
+    }
+
+    @Test
     fun connectionIndicatorWaitsForSetupAndTracksDisconnectRetryAndClose() {
         val first = startConnection()
         assertEquals(PhoneConnectionState.CONNECTING, connectionStates.last())

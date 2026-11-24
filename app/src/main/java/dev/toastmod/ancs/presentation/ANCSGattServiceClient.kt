@@ -59,6 +59,7 @@ class ANCSGattServiceClient(
     private val queuedAppNames = mutableSetOf<String>()
     private var refreshQueued = false
     private var connectedStatus = "Connected"
+    private var servicesInvalidated: ServicesInvalidated? = null
 
     private sealed interface Operation {
         data object Notification : Operation
@@ -85,6 +86,7 @@ class ANCSGattServiceClient(
 
     private class GattFailure(message: String) : Exception(message)
     private class GattStatusFailure(val status: Int) : Exception("GATT status $status")
+    private class ServicesInvalidated : Exception()
 
     init {
         scope.launch {
@@ -141,6 +143,17 @@ class ANCSGattServiceClient(
         connectionJob?.cancel()
         sessionJob?.cancel()
         sessionJob = null
+        val previous = gatt
+        gatt = null
+        clearSession()
+        try {
+            previous?.close()
+        } catch (error: SecurityException) {
+            Log.e("ANCS", "Permission revoked while closing Bluetooth", error)
+        }
+    }
+
+    private fun clearSession() {
         queue?.close()
         queue = null
         commandQueue?.close()
@@ -158,13 +171,7 @@ class ANCSGattServiceClient(
         notificationQueued = false
         attributeVersions.clear()
         refreshQueued = false
-        val previous = gatt
-        gatt = null
-        try {
-            previous?.close()
-        } catch (error: SecurityException) {
-            Log.e("ANCS", "Permission revoked while closing Bluetooth", error)
-        }
+        servicesInvalidated = null
         amsClient.reset()
         client.clear()
     }
@@ -200,89 +207,32 @@ class ANCSGattServiceClient(
 
     override fun onServiceChanged(gatt: BluetoothGatt) {
         scope.launch {
-            if (gatt === this@ANCSGattServiceClient.gatt) {
-                // Recreate the connection so no operation can use an invalidated service handle.
-                reconnect("iPhone services changed; rediscovering")
-            }
+            if (gatt === this@ANCSGattServiceClient.gatt) invalidateServices()
         }
+    }
+
+    private fun invalidateServices() {
+        if (queue == null || servicesInvalidated != null) return
+        val invalidated = ServicesInvalidated()
+        servicesInvalidated = invalidated
+        Log.i("ANCS", "iPhone services changed; rediscovering on the existing link")
+        onConnectionState(PhoneConnectionState.CONNECTING)
+        onStatus("iPhone services changed; rediscovering")
+        // Wake idle work or a data response wait, but let any active GATT request drain.
+        commandQueue?.close(invalidated)
+        queue?.close(invalidated)
+        pendingData?.result?.completeExceptionally(invalidated)
     }
 
     private fun startSession(gatt: BluetoothGatt) {
         if (sessionJob?.isActive == true) return
-        val operations = Channel<Operation>(64)
-        val commands = Channel<Operation>(64)
-        queue = operations
-        commandQueue = commands
         sessionJob = scope.launch {
             try {
-                awaitCallback(CallbackKind.SERVICES) { gatt.discoverServices() }
-                connectedStatus = setup(gatt)
-                retryDelay = 1_000
-                onConnectionState(PhoneConnectionState.CONNECTED)
-                onStatus(connectedStatus)
                 while (true) {
-                    val operation = commands.tryReceive().getOrNull() ?: select<Operation> {
-                        commands.onReceive { it }
-                        operations.onReceive { it }
-                    }
-                    when (operation) {
-                        Operation.Notification -> {
-                            notificationQueued = false
-                            val uid = requestedNotifications.values.firstOrNull()
-                            if (uid != null) receiveNotification(gatt, uid)
-                            scheduleNotification()
-                        }
-                        is Operation.AppName -> {
-                            try {
-                                receiveAppName(gatt, operation.identifier)
-                            } finally {
-                                queuedAppNames.remove(operation.identifier)
-                            }
-                        }
-                        is Operation.Command -> {
-                            if (operation.command in amsClient.state.value.supportedCommands) {
-                                write(gatt, characteristic(gatt, AMS_SERVICE, AMS_REMOTE_COMMAND),
-                                    byteArrayOf(operation.command))
-                            } else {
-                                Log.w("AMS", "Command is no longer supported: ${operation.command}")
-                                onStatus("This media command is not supported by the iPhone")
-                            }
-                        }
-                        is Operation.NotificationAction -> performNotificationAction(gatt, operation.action)
-                        Operation.CrownVolume -> {
-                            val pending = crownCommand
-                            crownCommand = null
-                            crownQueued = false
-                            if (pending != null) {
-                                val (command, timestamp) = pending
-                                val state = amsClient.state.value
-                                val now = SystemClock.elapsedRealtime()
-                                val lastWrite = lastCrownWrite
-                                if (now - timestamp <= 500 && (lastWrite == null || now - lastWrite >= 200) &&
-                                    state.available && command in state.supportedCommands
-                                ) {
-                                    lastCrownWrite = now
-                                    write(gatt, characteristic(gatt, AMS_SERVICE, AMS_REMOTE_COMMAND),
-                                        byteArrayOf(command))
-                                } else {
-                                    Log.d("AMS", "Dropping expired, rate-limited or unavailable crown volume command")
-                                }
-                            }
-                        }
-                        is Operation.Attribute -> readAttribute(gatt, operation)
-                        Operation.RefreshTrack -> {
-                            try {
-                                val state = amsClient.state.value
-                                if (state.available && state.player.isPlaying && !state.track.hasData) {
-                                    val update = characteristic(gatt, AMS_SERVICE, AMS_ENTITY_UPDATE)
-                                    subscribe(gatt, update, false)
-                                    subscribe(gatt, update)
-                                    registerMedia(gatt, update)
-                                }
-                            } finally {
-                                refreshQueued = false
-                            }
-                        }
+                    try {
+                        runSession(gatt)
+                    } catch (_: ServicesInvalidated) {
+                        clearSession()
                     }
                 }
             } catch (error: TimeoutCancellationException) {
@@ -295,6 +245,85 @@ class ANCSGattServiceClient(
                 Log.e("ANCS", "Bluetooth or notification permission revoked", error)
                 disposeConnection()
                 onStatus("Permission revoked; reopen the app")
+            }
+        }
+    }
+
+    private suspend fun runSession(gatt: BluetoothGatt) {
+        val operations = Channel<Operation>(64)
+        val commands = Channel<Operation>(64)
+        queue = operations
+        commandQueue = commands
+        awaitCallback(CallbackKind.SERVICES) { gatt.discoverServices() }
+        connectedStatus = setup(gatt)
+        retryDelay = 1_000
+        onConnectionState(PhoneConnectionState.CONNECTED)
+        onStatus(connectedStatus)
+        Log.i("ANCS", connectedStatus)
+        while (true) {
+            val operation = commands.tryReceive().getOrNull() ?: select<Operation> {
+                commands.onReceive { it }
+                operations.onReceive { it }
+            }
+            servicesInvalidated?.let { throw it }
+            when (operation) {
+                Operation.Notification -> {
+                    notificationQueued = false
+                    val uid = requestedNotifications.values.firstOrNull()
+                    if (uid != null) receiveNotification(gatt, uid)
+                    scheduleNotification()
+                }
+                is Operation.AppName -> {
+                    try {
+                        receiveAppName(gatt, operation.identifier)
+                    } finally {
+                        queuedAppNames.remove(operation.identifier)
+                    }
+                }
+                is Operation.Command -> {
+                    if (operation.command in amsClient.state.value.supportedCommands) {
+                        write(gatt, characteristic(gatt, AMS_SERVICE, AMS_REMOTE_COMMAND),
+                            byteArrayOf(operation.command))
+                    } else {
+                        Log.w("AMS", "Command is no longer supported: ${operation.command}")
+                        onStatus("This media command is not supported by the iPhone")
+                    }
+                }
+                is Operation.NotificationAction -> performNotificationAction(gatt, operation.action)
+                Operation.CrownVolume -> {
+                    val pending = crownCommand
+                    crownCommand = null
+                    crownQueued = false
+                    if (pending != null) {
+                        val (command, timestamp) = pending
+                        val state = amsClient.state.value
+                        val now = SystemClock.elapsedRealtime()
+                        val lastWrite = lastCrownWrite
+                        if (now - timestamp <= 500 && (lastWrite == null || now - lastWrite >= 200) &&
+                            state.available && command in state.supportedCommands
+                        ) {
+                            lastCrownWrite = now
+                            write(gatt, characteristic(gatt, AMS_SERVICE, AMS_REMOTE_COMMAND),
+                                byteArrayOf(command))
+                        } else {
+                            Log.d("AMS", "Dropping expired, rate-limited or unavailable crown volume command")
+                        }
+                    }
+                }
+                is Operation.Attribute -> readAttribute(gatt, operation)
+                Operation.RefreshTrack -> {
+                    try {
+                        val state = amsClient.state.value
+                        if (state.available && state.player.isPlaying && !state.track.hasData) {
+                            val update = characteristic(gatt, AMS_SERVICE, AMS_ENTITY_UPDATE)
+                            subscribe(gatt, update, false)
+                            subscribe(gatt, update)
+                            registerMedia(gatt, update)
+                        }
+                    } finally {
+                        refreshQueued = false
+                    }
+                }
             }
         }
     }
@@ -389,12 +418,17 @@ class ANCSGattServiceClient(
         uuid: UUID? = null,
         start: () -> Boolean
     ): ByteArray {
+        servicesInvalidated?.let { throw it }
         check(pendingCallback == null)
         val pending = PendingCallback(kind, uuid, CompletableDeferred())
         pendingCallback = pending
         try {
             if (!start()) throw GattFailure("Could not start Bluetooth $kind operation")
-            return withTimeout(10_000) { pending.result.await() }
+            val value = withTimeout(10_000) { pending.result.await() }
+            servicesInvalidated?.let { throw it }
+            return value
+        } catch (error: GattStatusFailure) {
+            throw servicesInvalidated ?: error
         } finally {
             if (pendingCallback === pending) pendingCallback = null
         }
@@ -433,6 +467,7 @@ class ANCSGattServiceClient(
     ) = complete(gatt, CallbackKind.READ, characteristic.uuid, status, value.copyOf())
 
     private fun enqueue(operation: Operation) {
+        if (servicesInvalidated != null) return
         val sent = if (operation is Operation.Command ||
             operation is Operation.NotificationAction || operation == Operation.CrownVolume
         ) {
@@ -454,7 +489,7 @@ class ANCSGattServiceClient(
 
     fun sendAMSCommand(command: Byte) {
         val state = amsClient.state.value
-        if (!state.available || command !in state.supportedCommands) {
+        if (servicesInvalidated != null || !state.available || command !in state.supportedCommands) {
             Log.w("AMS", "Cannot send unavailable media command $command")
             onStatus("Media command unavailable")
             return
@@ -464,7 +499,7 @@ class ANCSGattServiceClient(
 
     fun sendCrownVolume(command: Byte) {
         val state = amsClient.state.value
-        if (command !in setOf(AMSCommand.VOLUME_UP, AMSCommand.VOLUME_DOWN) ||
+        if (servicesInvalidated != null || command !in setOf(AMSCommand.VOLUME_UP, AMSCommand.VOLUME_DOWN) ||
             !state.available || command !in state.supportedCommands
         ) {
             Log.w("AMS", "Cannot send unavailable crown volume command")
@@ -479,7 +514,9 @@ class ANCSGattServiceClient(
     }
 
     fun sendNotificationAction(action: ANCSNotificationAction) {
-        if (gatt == null || commandQueue == null || !client.isActionAvailable(action)) {
+        if (gatt == null || commandQueue == null || servicesInvalidated != null ||
+            !client.isActionAvailable(action)
+        ) {
             actionError("Notification action is no longer available")
             return
         }
@@ -617,7 +654,9 @@ class ANCSGattServiceClient(
     ) {
         val data = value.copyOf()
         scope.launch {
-            if (gatt !== this@ANCSGattServiceClient.gatt) return@launch
+            if (gatt !== this@ANCSGattServiceClient.gatt || queue == null || servicesInvalidated != null) {
+                return@launch
+            }
             when (characteristic.uuid) {
                 ANCS_NOTIFICAITON_SOURCE -> {
                     if (data.size != 8) {
@@ -659,7 +698,7 @@ class ANCSGattServiceClient(
                         enqueue(Operation.Attribute(data[0], data[1], version))
                     }
                 }
-                SERVICE_CHANGED -> reconnect("iPhone services changed; rediscovering")
+                SERVICE_CHANGED -> invalidateServices()
             }
         }
     }
