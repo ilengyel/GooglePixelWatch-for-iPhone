@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothDevice
 import android.content.ComponentName
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
@@ -12,18 +13,25 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -34,7 +42,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.wear.compose.material3.AppScaffold
+import androidx.wear.compose.material3.Icon
+import androidx.wear.compose.material3.IconButton
 import androidx.wear.compose.material3.ScreenScaffold
+import androidx.wear.compose.material3.Text
+import androidx.wear.compose.material3.TextButton
+import androidx.compose.ui.res.stringResource
 import androidx.wear.compose.foundation.BasicSwipeToDismissBox
 import androidx.lifecycle.lifecycleScope
 import dev.toastmod.ancs.R
@@ -206,6 +219,8 @@ enum class AppAttributeID(val b: Byte) {
 
 val NOTIF_CHANNEL_ID = "com.apple.ancs"
 
+private const val MAIN_SCREEN_TIMEOUT_MS = 120_000L
+
 class MainActivity : ComponentActivity() {
     private var gattService by mutableStateOf<ANCSAndroidService?>(null)
     private val disconnectedState = MutableStateFlow(AMSState())
@@ -213,8 +228,11 @@ class MainActivity : ComponentActivity() {
     private val notForgetting = MutableStateFlow(false)
     private val localStatus = MutableStateFlow("Select a paired iPhone")
     private var bound = false
+    private var lastStoppedAt: Long? = null
     private var chooser: AlertDialog? = null
     private var diagnosticPhone by mutableStateOf<BluetoothDevice?>(null)
+    private var showingApps by mutableStateOf(false)
+    private val emptyApps = MutableStateFlow<List<NotificationApp>>(emptyList())
     private var phoneChoices by mutableStateOf<List<BluetoothDevice>?>(null)
     private var selectedPhoneAddress by mutableStateOf<String?>(null)
     private val forgetInProgress get() = gattService?.forgettingPhone?.value == true
@@ -250,14 +268,32 @@ class MainActivity : ComponentActivity() {
             val forgetting by (service?.forgettingPhone ?: notForgetting).collectAsStateWithLifecycle()
             val phone = diagnosticPhone
             val choices = phoneChoices
+            val apps by (service?.notificationApps ?: emptyApps).collectAsStateWithLifecycle()
             PhoneScreenBackNavigation(
-                hasPreviousScreen = phone != null || choices != null,
+                hasPreviousScreen = phone != null || choices != null || showingApps,
                 navigationBlocked = forgetting,
                 onBack = {
-                    if (phone != null) diagnosticPhone = null else phoneChoices = null
+                    when {
+                        showingApps -> showingApps = false
+                        phone != null -> diagnosticPhone = null
+                        else -> phoneChoices = null
+                    }
                 }
             ) {
-                if (phone != null) {
+                if (showingApps) {
+                    AppFilterScreen(
+                        apps = apps,
+                        connected = phoneConnectionState == PhoneConnectionState.CONNECTED,
+                        onEnabledChange = { identifier, enabled ->
+                            try {
+                                check(service != null) { "No active iPhone connection" }
+                                service.setNotificationAppEnabled(identifier, enabled)
+                            } catch (error: IllegalStateException) {
+                                showMessage(error.message ?: "Could not update notification filter")
+                            }
+                        }
+                    )
+                } else if (phone != null) {
                     val isSelected = phone.address == selectedPhoneAddress
                     PhoneDiagnosticsScreen(
                         device = phone,
@@ -288,9 +324,8 @@ class MainActivity : ComponentActivity() {
                     )
                 } else WearApp(
                     amsState = service?.mediaState ?: disconnectedState,
-                    onTogglePlayPause = { sendAMSCommand(AMSCommand.TOGGLE_PLAY_PAUSE) },
-                    onNextTrack = { sendAMSCommand(AMSCommand.NEXT_TRACK) },
-                    onPreviousTrack = { sendAMSCommand(AMSCommand.PREVIOUS_TRACK) },
+                    onOpenMediaControls = ::openMediaControls,
+                    onNotificationApps = { showingApps = true },
                     status = connectionStatus,
                     connectionState = phoneConnectionState,
                     onChoosePhone = {
@@ -304,10 +339,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (hasPermissions()) startAndBind()
+        val stoppedAt = lastStoppedAt
+        lastStoppedAt = null
+        if (stoppedAt != null && SystemClock.elapsedRealtime() - stoppedAt >= MAIN_SCREEN_TIMEOUT_MS) {
+            showingApps = false
+            diagnosticPhone = null
+            phoneChoices = null
+        }
+        if (hasPermissions()) startAndBind(offerPhoneSelection = stoppedAt == null)
     }
 
     override fun onStop() {
+        lastStoppedAt = SystemClock.elapsedRealtime()
         chooser?.dismiss()
         chooser = null
         if (bound) {
@@ -328,7 +371,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @android.annotation.SuppressLint("MissingPermission")
-    private fun startAndBind() {
+    private fun startAndBind(offerPhoneSelection: Boolean = true) {
         if (!hasPermissions()) return
         val address = getSharedPreferences(ANCSAndroidService.PREFERENCES, MODE_PRIVATE)
             .getString(ANCSAndroidService.TARGET_ADDRESS, null)
@@ -337,7 +380,7 @@ class MainActivity : ComponentActivity() {
         if (address == null || adapter == null ||
             (adapter.isEnabled && adapter.bondedDevices.none { it.address == address })
         ) {
-            choosePhone()
+            if (offerPhoneSelection) choosePhone()
             return
         }
         val intent = Intent(this, ANCSAndroidService::class.java)
@@ -412,13 +455,18 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
-    @android.annotation.SuppressLint("MissingPermission")
-    private fun sendAMSCommand(command: Byte) {
-        val service = gattService
-        when {
-            !hasPermissions() -> showMessage("Bluetooth and notification permissions are required")
-            service == null -> showMessage("No active iPhone connection")
-            else -> service.sendAMSCommand(command)
+    private fun openMediaControls() {
+        val intent = NativeMediaControls.intent(this)
+        if (intent == null) {
+            showMessage(getString(R.string.native_media_unavailable))
+            return
+        }
+        try {
+            startActivity(intent)
+        } catch (error: ActivityNotFoundException) {
+            showMessage(getString(R.string.native_media_unavailable))
+        } catch (error: SecurityException) {
+            showMessage(getString(R.string.native_media_unavailable))
         }
     }
 }
@@ -449,12 +497,11 @@ internal fun PhoneScreenBackNavigation(
 @Composable
 fun WearApp(
     amsState: StateFlow<AMSState>,
-    onTogglePlayPause: () -> Unit,
-    onNextTrack: () -> Unit,
-    onPreviousTrack: () -> Unit,
+    onOpenMediaControls: () -> Unit,
     status: String = "",
     connectionState: PhoneConnectionState = PhoneConnectionState.DISCONNECTED,
-    onChoosePhone: (() -> Unit)? = null
+    onChoosePhone: (() -> Unit)? = null,
+    onNotificationApps: (() -> Unit)? = null
 ) {
     val state by amsState.collectAsStateWithLifecycle()
     ANCSTheme {
@@ -470,19 +517,48 @@ fun WearApp(
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        NowPlayingScreen(
-                            state = state,
-                            onTogglePlayPause = onTogglePlayPause,
-                            onNextTrack = onNextTrack,
-                            onPreviousTrack = onPreviousTrack
+                        Text(
+                            text = if (state.track.hasData) state.track.title.ifBlank {
+                                stringResource(R.string.media_unknown_title)
+                            } else stringResource(when {
+                                !state.available -> R.string.media_unavailable
+                                state.hasNativeMedia() -> R.string.iphone_media
+                                else -> R.string.media_nothing_playing
+                            }),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                         )
-                        if (onChoosePhone != null) {
-                            PhoneConnectionButton(
-                                connectionState = connectionState,
-                                status = status,
-                                onChoosePhone = onChoosePhone,
-                                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
-                            )
+                        TextButton(
+                            onClick = onOpenMediaControls,
+                            enabled = state.hasNativeMedia(),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Text(stringResource(R.string.native_media_controls))
+                        }
+                        if (onChoosePhone != null || onNotificationApps != null) {
+                            Row(
+                                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (onChoosePhone != null) {
+                                    PhoneConnectionButton(
+                                        connectionState = connectionState,
+                                        status = status,
+                                        onChoosePhone = onChoosePhone
+                                    )
+                                }
+                                if (onNotificationApps != null) {
+                                    IconButton(
+                                        onClick = onNotificationApps,
+                                        modifier = Modifier.size(48.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Notifications,
+                                            contentDescription = stringResource(R.string.notification_apps)
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -505,10 +581,9 @@ fun DefaultPreview() {
                     AMSCommand.PREVIOUS_TRACK)
             )
         ),
-        onTogglePlayPause = {},
-        onNextTrack = {},
-        onPreviousTrack = {},
+        onOpenMediaControls = {},
         connectionState = PhoneConnectionState.CONNECTED,
-        onChoosePhone = {}
+        onChoosePhone = {},
+        onNotificationApps = {}
     )
 }

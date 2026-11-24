@@ -9,12 +9,14 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33], manifest = Config.NONE)
@@ -30,6 +32,66 @@ class ANCSNotificationLifecycleTest {
     private fun client(): ANCSClient {
         manager.createNotificationChannel(channel)
         return ANCSClient(context, channel)
+    }
+
+    private fun renderedActions(id: Int): List<ANCSNotificationAction> =
+        manager.activeNotifications.single { it.id == id }.notification.actions.orEmpty().map {
+            requireNotNull(ANCSNotificationAction.fromIntent(shadowOf(it.actionIntent).savedIntent))
+        }
+
+    @Test
+    fun onlyFlaggedNonBlankLabelsBecomeDistinctImmutableActionsAndSwipesStayLocal() {
+        val client = client()
+        val attributes = attributes("Call").copy(positiveActionLabel = "Answer", negativeActionLabel = "Decline")
+        for ((id, flags) in listOf(1 to 0, 2 to 8, 3 to 16, 4 to 24)) {
+            client.onNotificationSource(0, flags.toByte(), 1, uid(id))
+            client.onAttributes(uid(id), attributes)
+            val notification = manager.activeNotifications.single { it.id == id }.notification
+            assertEquals(when (flags) { 8 -> listOf("Answer"); 16 -> listOf("Decline")
+                24 -> listOf("Answer", "Decline"); else -> emptyList() },
+                notification.actions.orEmpty().map { it.title.toString() })
+            assertNull(notification.deleteIntent)
+            notification.actions.orEmpty().forEach { assertTrue(it.actionIntent.isImmutable) }
+        }
+        val both = renderedActions(4)
+        assertEquals(listOf<Byte>(0, 1), both.map { it.action })
+        assertTrue(both.all(client::isActionAvailable))
+        val intents = manager.activeNotifications.single { it.id == 4 }.notification.actions
+        assertNotSame(intents[0].actionIntent, intents[1].actionIntent)
+        client.onNotificationSource(1, 24, 1, uid(4))
+        client.onAttributes(uid(4), attributes.copy(positiveActionLabel = "", negativeActionLabel = " "))
+        assertTrue(renderedActions(4).isEmpty())
+    }
+
+    @Test
+    fun actionsExpireOnUpdatesFilteringRemovalAndSessionChangesAndAreNotReplayed() {
+        val client = client()
+        fun post(): ANCSNotificationAction {
+            client.onNotificationSource(0, 8, 0, uid(1))
+            client.onAttributes(uid(1), attributes("Title").copy(positiveActionLabel = "Open"))
+            return renderedActions(1).single()
+        }
+        val original = post()
+        client.onNotificationSource(1, 0, 0, uid(1))
+        assertFalse(client.isActionAvailable(original))
+        val blocked = post()
+        client.apps.setEnabled("com.example.app", false)
+        client.applyFilters()
+        assertFalse(client.isActionAvailable(blocked))
+        client.apps.setEnabled("com.example.app", true)
+        val removed = post()
+        client.onNotificationSource(2, 0, 0, uid(1))
+        assertFalse(client.isActionAvailable(removed))
+        val oldSession = post()
+        client.clear()
+        val fresh = post()
+        assertFalse(client.isActionAvailable(oldSession))
+        assertTrue(client.isActionAvailable(fresh))
+        client.completeAction(fresh)
+        client.onAppName("com.example.app", "Friendly name")
+        assertTrue(renderedActions(1).isEmpty())
+        assertFalse(client.isActionAvailable(fresh))
+        assertEquals("Title", manager.activeNotifications.single().notification.extras.getString(Notification.EXTRA_TITLE))
     }
 
     @Test
@@ -88,6 +150,67 @@ class ANCSNotificationLifecycleTest {
         assertEquals("other.app", manager.activeNotifications.single().notification.group)
         assertEquals("Changed message",
             manager.activeNotifications.single().notification.extras.getString(Notification.EXTRA_TEXT))
+    }
+
+    @Test
+    fun appNameResolutionDoesNotRepostALocallyDismissedNotification() {
+        val client = client()
+        client.onNotificationSource(0, 0, 0, uid(1))
+        client.onAttributes(uid(1), attributes("Title"))
+        manager.cancel(ANCSNotification.TAG, 1)
+
+        client.onAppName("com.example.app", "Friendly name")
+
+        assertTrue(manager.activeNotifications.isEmpty())
+        client.onNotificationSource(1, 0, 0, uid(1))
+        client.onAttributes(uid(1), attributes("Changed title"))
+        assertEquals("Friendly name",
+            manager.activeNotifications.single().notification.extras.getString(Notification.EXTRA_SUB_TEXT))
+    }
+
+    @Test
+    fun actionCompletionDoesNotRepostALocallyDismissedNotification() {
+        val client = client()
+        client.onNotificationSource(0, 8, 0, uid(1))
+        client.onAttributes(uid(1), attributes("Title").copy(positiveActionLabel = "Open"))
+        val action = renderedActions(1).single()
+        manager.cancel(ANCSNotification.TAG, 1)
+
+        client.completeAction(action)
+        client.onAppName("com.example.app", "Friendly name")
+
+        assertTrue(manager.activeNotifications.isEmpty())
+        assertFalse(client.isActionAvailable(action))
+    }
+
+    @Test
+    fun unchangedActionNotificationsRefreshTokensWithoutReposting() {
+        val client = client()
+        val attributes = attributes("Title").copy(positiveActionLabel = "Open", negativeActionLabel = "Dismiss")
+        client.onNotificationSource(0, 24, 0, uid(1))
+        client.onAttributes(uid(1), attributes)
+        val original = manager.activeNotifications.single().notification
+
+        repeat(2) {
+            val oldActions = renderedActions(1)
+            client.onNotificationSource(1, 24, 0, uid(1))
+            assertTrue(oldActions.none(client::isActionAvailable))
+            client.onAttributes(uid(1), attributes)
+
+            assertSame(original, manager.activeNotifications.single().notification)
+            assertTrue(oldActions.none(client::isActionAvailable))
+            val freshActions = renderedActions(1)
+            assertTrue(freshActions.all(client::isActionAvailable))
+            assertTrue(freshActions.zip(oldActions).all { (fresh, old) -> fresh.revision > old.revision })
+        }
+
+        val previousActions = renderedActions(1)
+        client.onNotificationSource(1, 24, 0, uid(1))
+        client.onAttributes(uid(1), attributes.copy(positiveActionLabel = "Answer"))
+        assertNotSame(original, manager.activeNotifications.single().notification)
+        assertEquals(listOf("Answer", "Dismiss"), renderedActions(1).map { it.label })
+        assertTrue(previousActions.none(client::isActionAvailable))
+        assertTrue(renderedActions(1).all(client::isActionAvailable))
     }
 
     @Test

@@ -4,7 +4,26 @@ Changes from the original fork baseline. Versions follow Semantic Versioning,
 newest first; keep `versionName` in sync and increment `versionCode` for each
 app version.
 
-## [2.0.0] - Unreleased
+## [2.0.2] - 2026-11-23
+
+- Replaced the in-app player with native Wear OS media controls for iPhone
+  playback and volume. Audio still plays on the iPhone.
+- Clear stale media controls when Apple Music closes or the iPhone disconnects.
+- Put the Notification apps bell beside the iPhone connection icon.
+- Return to the main screen after two minutes or more in the background.
+
+## [2.0.1] - 2026-11-19
+
+- Cached app names and per-iPhone notification filters.
+- iPhone-provided notification action buttons with stale-action protection;
+  watch swipes remain local.
+- Expanded media controls for volume, skip, shuffle and repeat, plus opt-in
+  crown volume without polling.
+- Prevent duplicate notification updates and dismissed alerts reappearing after
+  app-name or action-completion updates.
+- Enable Gradle configuration and local build caching for faster repeat builds.
+
+## [2.0.0] - 2026-11-15
 
 - Windows and VS Code workflows for building and wireless ADB setup/install.
 - Explicit iPhone selection, per-device diagnostics with crown scrolling, and

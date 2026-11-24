@@ -12,8 +12,12 @@ The [README](README.md) records Pixel Watch 4 testing; battery costs below are
 qualitative, not measured.
 
 **Implemented:** ANCS notification title/subtitle/message and updates/removals
-for retained notifications; AMS title/artist/playback state and supported
-play/pause/previous/next commands; background service, remembered phone and
+for retained notifications, labelled advertised actions, session-cached app names
+and per-phone filtering;
+AMS title/artist/playback/volume and shuffle/repeat state with supported
+play/pause/previous/next, bounded remote volume, skip and mode-cycling commands,
+exposed through a native Android media session and notification;
+background service, remembered phone and
 automatic reconnection; phone selection, status, diagnostics and forget/unpair.
 Connection management is app-level, not full native Settings integration.
 
@@ -30,11 +34,11 @@ the capabilities below are missing.
 
 | Capability | Current limitation | Feasibility / boundary |
 | --- | --- | --- |
-| Notification buttons and watch-to-phone dismissal | No actions. | ANCS positive/negative actions are feasible; use supplied labels. A negative action is not always dismissal, and these are not arbitrary Android actions. Answer/decline may be available for calls, but **answering does not establish call audio**. |
-| App names and per-app filtering | App identifier used for grouping; generic icon/text; no bridge filtering. | Cache ANCS app display names and filter by identifier. iPhone sharing settings also affect delivery; richer visuals need another path. |
+| Notification buttons and watch-to-phone dismissal | Labelled advertised ANCS actions implemented; watch swipes remain local. | A negative action is not always dismissal, and these are not arbitrary Android actions. Stale/filtered/removed actions are rejected. Answer/decline may be available for calls, but **answering does not establish call audio**. |
+| App names and per-app filtering | Implemented: session-cached display names and persistent per-phone filters; generic icon remains. | Unknown notifications need an identifier lookup before filtering. Blocked apps skip text/name reads; enabling does not replay alerts. iPhone sharing settings still affect delivery; richer visuals need another path. |
 | Notification continuity/history | Retains up to 20; clears mirrored notifications on disconnect. | Larger retention is straightforward, but **ANCS is not durable history or synchronization**. |
-| Expanded media controls and metadata | No volume UI; model parses album/duration/playback timing, but subscriptions/UI are limited. | AMS provides volume state/up/down, album, duration, progress, shuffle/repeat and skip forward/back, subject to media-app support. |
-| Native Wear media controls, tile and complication | Controls are in-app; tile/complication are starter surfaces. | Expose a proper media session and event-updated surfaces. |
+| Expanded media controls and metadata | Album, duration and timestamped playback state are published; skip/shuffle/repeat are session custom actions. | Controls follow advertised support and phone-reported state; skip interval is player-defined. No arbitrary seeking or artwork; custom-action visibility depends on system UI. |
+| Native Wear media controls, tile and complication | Remote media session and native notification implemented; custom player replaced by a system-controls entry point. Tile/complication remain starter surfaces. | Verify session discovery/selection, paused state and crown volume on-device; build event-updated tile/complication separately. |
 | Reboot recovery and long-idle reliability | Reconnection exists; no boot receiver. | Add reboot recovery and validate long-idle delivery. A foreground service does not guarantee uninterrupted delivery. |
 | Phone-left-behind alert | No disconnect alert. | Debounce connection events; disconnect is not reliable proof of distance or theft. |
 
@@ -94,10 +98,12 @@ UI collection is lifecycle-aware; diagnostics observation stops with the screen.
 - Reconnect attempts continue indefinitely while the phone is unavailable:
   faster recovery trades off against out-of-range drain.
 - Notification storms drive BLE work, vibration and display wakeups. Filter
-  early to avoid attribute requests and alerts; avoid unnecessary text fetches
-  and replayed alerts.
+  early to avoid text requests and alerts; unknown UIDs still need an app
+  identifier lookup. Allowed cold notifications gain a separate text transaction
+  and uncached names need a lookup. Filtering is not a measured battery saving.
 - Keep media progress local and **visible-screen only**, surfaces event-driven,
-  and crown-volume writes bounded. Scrolling titles/animations still cost power.
+  and crown-volume writes bounded (implemented: one per 200 ms, one queued
+  direction, 500 ms expiry). Native UI controls progress rendering and crown focus.
 - Cache names and batch data/health summaries rather than polling or streaming.
   Simple BLE buttons, text and on-demand ringing are relatively cheap;
   dictation/AI suggestions add microphone, compute or network costs.
@@ -111,9 +117,11 @@ A foreground service does not imply zero idle drain. See
 ## 4. Recommended implementation order
 
 1. **Best value, lowest power:** labelled ANCS actions, app-name caching/filtering,
-   media volume and additional AMS controls.
-2. **Daily usability:** real media session, useful tile/complication, debounced
-   disconnect alerts and reboot recovery.
+   media volume and additional AMS controls. App names/filtering and media
+   controls, including labelled actions and native remote media integration, are now implemented in
+   source with automated coverage. Hardware and battery validation remain outstanding.
+2. **Daily usability:** verify native media controls on-device; implement useful
+   tile/complication, debounced disconnect alerts and reboot recovery.
 3. **Measure before expanding:** compare stopped, connected-idle,
    notification-heavy and out-of-range operation with wireless debugging off.
 4. **Choose a companion direction:** global permissioned data features versus
@@ -129,7 +137,7 @@ A foreground service does not imply zero idle drain. See
 [AMS state/parser](app/src/main/java/dev/toastmod/ancs/presentation/AMSClient.kt),
 [BLE transport/subscriptions](app/src/main/java/dev/toastmod/ancs/presentation/ANCSGattServiceClient.kt),
 [service](app/src/main/java/dev/toastmod/ancs/presentation/ANCSAndroidService.kt),
-[media UI](app/src/main/java/dev/toastmod/ancs/presentation/NowPlayingScreen.kt).
+[native media session](app/src/main/java/dev/toastmod/ancs/presentation/IPhoneMediaSession.kt).
 
 **Google:** [calls/messaging](https://support.google.com/googlepixelwatch/answer/12674814?hl=en),
 [camera remote](https://support.google.com/wearos/answer/11532572?hl=en-AU),

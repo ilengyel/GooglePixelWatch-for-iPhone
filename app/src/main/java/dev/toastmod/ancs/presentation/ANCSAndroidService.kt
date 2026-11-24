@@ -17,6 +17,7 @@ import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
+import android.widget.Toast
 import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
@@ -34,6 +35,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.reflect.InvocationTargetException
 
@@ -44,10 +46,13 @@ class ANCSAndroidService : Service() {
     val status = mutableStatus.asStateFlow()
     private val mutableConnectionState = MutableStateFlow(PhoneConnectionState.DISCONNECTED)
     val connectionState = mutableConnectionState.asStateFlow()
+    private val mutableNotificationApps = MutableStateFlow<List<NotificationApp>>(emptyList())
+    val notificationApps = mutableNotificationApps.asStateFlow()
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var gattClient: ANCSGattServiceClient? = null
     private var targetAddress: String? = null
+    private lateinit var nativeMedia: IPhoneMediaSession
     private val mutableForgettingPhone = MutableStateFlow(false)
     val forgettingPhone = mutableForgettingPhone.asStateFlow()
 
@@ -98,6 +103,16 @@ class ANCSAndroidService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        nativeMedia = IPhoneMediaSession(this, { command, volume ->
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                sendAMSCommand(command, fromCrown = volume)
+            } else {
+                showActionError(getString(R.string.media_bluetooth_permission))
+            }
+        }, ::showActionError)
+        serviceScope.launch { mediaState.collect { nativeMedia.update(it) } }
         val manager = getSystemService(NotificationManager::class.java)
         manager.activeNotifications.filter { it.tag == ANCSNotification.TAG }.forEach {
             manager.cancel(it.tag, it.id)
@@ -116,7 +131,29 @@ class ANCSAndroidService : Service() {
         ) {
             Log.e("ANCS", "Cannot start: Bluetooth and notification permissions are required")
             stopConnection("Bluetooth and notification permissions required")
+            if (intent?.action == ANCSNotificationAction.INTENT_ACTION ||
+                intent?.action == IPhoneMediaSession.INTENT_ACTION
+            ) {
+                showActionError("Bluetooth and notification permissions required")
+            }
             return START_NOT_STICKY
+        }
+        if (intent?.action == IPhoneMediaSession.INTENT_ACTION) {
+            nativeMedia.handleIntent(intent)
+            if (targetAddress == null) stopSelfResult(startId)
+            return if (targetAddress == null) START_NOT_STICKY else START_STICKY
+        }
+        if (intent?.action == ANCSNotificationAction.INTENT_ACTION) {
+            val action = ANCSNotificationAction.fromIntent(intent)
+            val client = gattClient
+            if (action == null || client == null) {
+                Log.w("ANCS", "Notification action has no valid active connection")
+                showActionError(getString(R.string.notification_action_unavailable))
+            } else {
+                client.sendNotificationAction(action)
+            }
+            if (targetAddress == null) stopSelfResult(startId)
+            return if (targetAddress == null) START_NOT_STICKY else START_STICKY
         }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
@@ -166,23 +203,44 @@ class ANCSAndroidService : Service() {
                 setShowBadge(false)
             }
         manager.createNotificationChannel(channel)
+        val apps = NotificationApps(preferences, device.address) {
+            mutableNotificationApps.value = it
+        }
         gattClient = ANCSGattServiceClient(
-            this, device, ANCSClient(this, channel), amsClient,
+            this, device, ANCSClient(this, channel, apps), amsClient,
             onStatus = { mutableStatus.value = it },
-            onConnectionState = { mutableConnectionState.value = it }
+            onConnectionState = { mutableConnectionState.value = it },
+            onActionError = ::showActionError
         ).also { it.connect() }
         return START_STICKY
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    fun sendAMSCommand(command: Byte) {
+    fun sendAMSCommand(command: Byte, fromCrown: Boolean = false) {
         val client = gattClient
         if (client == null) {
             Log.w("AMS", "Cannot send command without an active client")
             mutableStatus.value = "No active iPhone connection"
             return
         }
-        client.sendAMSCommand(command)
+        if (fromCrown) client.sendCrownVolume(command) else client.sendAMSCommand(command)
+    }
+
+    private fun showActionError(message: String) {
+        mutableStatus.value = message
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    fun setNotificationAppEnabled(identifier: String, enabled: Boolean) {
+        val client = gattClient
+        check(client != null) { "No active iPhone connection" }
+        try {
+            client.setAppEnabled(identifier, enabled)
+        } catch (error: IllegalStateException) {
+            Log.e("ANCS", "Could not update notification filter", error)
+            mutableStatus.value = error.message ?: "Could not update notification filter"
+            throw error
+        }
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -214,7 +272,8 @@ class ANCSAndroidService : Service() {
                     "Unpair was requested, but removal was not confirmed. Check Bluetooth settings before retrying"
                 }
             }
-            check(preferences.edit().remove(TARGET_ADDRESS).commit()) {
+            check(preferences.edit().remove(TARGET_ADDRESS)
+                .remove(NotificationApps.blockedKey(address)).commit()) {
                 "Pairing removed, but the saved phone selection could not be cleared"
             }
             forgotten = true
@@ -258,6 +317,7 @@ class ANCSAndroidService : Service() {
         unregisterReceiver(bluetoothReceiver)
         serviceScope.cancel()
         closeClient()
+        nativeMedia.close()
         targetAddress = null
         mutableStatus.value = "Disconnected"
         super.onDestroy()
@@ -266,6 +326,8 @@ class ANCSAndroidService : Service() {
     private fun closeClient() {
         gattClient?.close()
         gattClient = null
+        amsClient.reset()
+        nativeMedia.update(AMSState())
         mutableConnectionState.value = PhoneConnectionState.DISCONNECTED
     }
 
